@@ -195,3 +195,51 @@ BACKEND_BASE_URL=http://你的服务器IP:8000
 
 或在以后增加的设置界面中调整。
 
+---
+
+### 三、生成 Windows 安装包（Inno Setup）
+
+在完成「一、客户端打包为 `.exe`」后，如果希望给用户一个「下一步下一步安装」的安装包，可以使用 **Inno Setup**。
+
+#### 1. 准备 Inno Setup
+
+1. 在 Windows 上安装 [Inno Setup](https://jrsoftware.org/isinfo.php)。
+2. 确保已经通过 PyInstaller 生成了单文件 `OpenClaw.exe`，例如：
+
+```text
+D:\openClaw\dist\OpenClaw.exe
+```
+
+#### 2. 使用仓库中的安装脚本
+
+项目根目录下已经提供示例脚本 `OpenClaw.iss`，核心内容如下：
+
+```text
+[Setup]
+AppName=OpenClaw 公众号写作助手
+AppVersion=1.0.0
+DefaultDirName={pf}\OpenClaw
+OutputBaseFilename=OpenClaw-Setup
+
+[Files]
+; 注意：根据实际路径调整 Source
+Source: "D:\openClaw\dist\OpenClaw.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+[Icons]
+Name: "{group}\OpenClaw 公众号写作助手"; Filename: "{app}\OpenClaw.exe"
+Name: "{commondesktop}\OpenClaw 公众号写作助手"; Filename: "{app}\OpenClaw.exe"; Tasks: desktopicon
+```
+
+使用步骤：
+
+1. 在 Inno Setup 中打开仓库根目录下的 `OpenClaw.iss`。
+2. 如果你的 PyInstaller 输出路径不是 `D:\openClaw\dist\OpenClaw.exe`，请将 `Source` 一行改成你的实际路径。
+3. 点击 **Compile** 编译脚本，生成 `OpenClaw-Setup.exe` 安装包。
+
+生成的安装包支持：
+
+- 安装到 `C:\Program Files\OpenClaw\`（默认）；
+- 在开始菜单创建「OpenClaw 公众号写作助手」快捷方式；
+- 可选创建桌面快捷方式；
+- 安装完成后可勾选「立即运行」直接启动程序。
+
