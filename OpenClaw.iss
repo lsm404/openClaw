@@ -26,8 +26,7 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 [Files]
 ; 注意：请根据实际路径调整 Source
 ; 例如：D:\openClaw\dist\OpenClaw.exe
-Source: "D:\openClaw\dist\OpenClaw.exe"; DestDir: "{app}"; Flags: ignoreversion
-
+Source: "D:\openClaw\dist\OpenClaw\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 [Icons]
 ; 开始菜单快捷方式
 Name: "{group}\OpenClaw 公众号写作助手"; Filename: "{app}\OpenClaw.exe"
