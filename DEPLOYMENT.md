@@ -133,6 +133,39 @@ ps aux | grep uvicorn
 
 > 正式环境可以用宝塔「守护进程」或 `systemd` 配置为开机自启，这里给的是最小可用流程。
 
+#### 5.1 停止后端服务
+
+如果是用上面的 `nohup` 方式启动的，可以用下面的方式停止：
+
+**方式一：通过进程名快速停止**
+
+```bash
+pkill -f "uvicorn wechat_backend.app:app"
+```
+
+**方式二：手动找到 PID 再 kill**
+
+```bash
+# 查看 uvicorn 进程
+ps aux | grep uvicorn
+
+# 假设看到一行类似：
+# root   12345  ...  uvicorn wechat_backend.app:app --host 0.0.0.0 --port 8000
+# 其中 12345 就是 PID
+
+kill 12345          # 正常停止
+# 如数秒后进程仍存在，可强制：
+kill -9 12345
+```
+
+再次执行：
+
+```bash
+ps aux | grep uvicorn
+```
+
+没有 uvicorn 相关进程时，说明后端服务已完全停止。
+
 #### 6. 开放端口 / 安全组
 
 在云厂商控制台的「安全组」开放 **TCP 8000**。  
