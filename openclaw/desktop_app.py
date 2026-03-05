@@ -516,7 +516,7 @@ class MainWindow(QMainWindow):
         self.result_edit.clear()
 
     def _on_upload_thumb_clicked(self) -> None:
-        """直接调微信 API 上传封面图，根据格式自动选 type，自动填入 thumb_media_id。"""
+        """通过后端服务上传封面图，根据格式自动选 type，自动填入 thumb_media_id。"""
         filename, _ = QFileDialog.getOpenFileName(
             self,
             "选择封面图（PNG ≤64KB / JPG ≤10MB）",
@@ -541,16 +541,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        appid = self.wechat_appid_edit.text().strip()
-        appsecret = self.wechat_appsecret_edit.text().strip()
-        if not appid or not appsecret:
-            appid = os.getenv("WECHAT_APPID", "").strip()
-            appsecret = os.getenv("WECHAT_APPSECRET", "").strip()
-        if not appid or not appsecret:
-            QMessageBox.warning(self, "缺少配置", "请先填写公众号 AppID 和 Secret。")
-            return
-
-        # 保存最新的公众号配置
+        # 更新本地保存的账号配置（便于下次自动填充）
         self._save_account_settings()
 
         self.upload_thumb_button.setEnabled(False)
@@ -562,37 +553,37 @@ class MainWindow(QMainWindow):
             with open(filename, "rb") as f:
                 file_bytes = f.read()
 
-            # 1. 获取 access_token
-            token_resp = requests.get(
-                "https://api.weixin.qq.com/cgi-bin/token",
-                params={
-                    "grant_type": "client_credential",
-                    "appid": appid,
-                    "secret": appsecret,
-                },
-                timeout=15,
+            # 通过后端转发到微信接口
+            backend_base = os.getenv(
+                "BACKEND_BASE_URL", "http://49.235.172.63:8000/"
+            ).rstrip("/")
+            fname = Path(filename).name
+            files = {"file": (fname, file_bytes, mime_type)}
+
+            # 可选：将当前填写的 AppID/Secret 传给后端，未填写则由后端自己用环境变量
+            appid = self.wechat_appid_edit.text().strip()
+            appsecret = self.wechat_appsecret_edit.text().strip()
+            form_data: Dict[str, str] = {}
+            if appid and appsecret:
+                form_data["wechat_appid"] = appid
+                form_data["wechat_appsecret"] = appsecret
+
+            resp = requests.post(
+                f"{backend_base}/wechat/upload_thumb",
+                data=form_data,
+                files=files,
+                timeout=60,
             )
-            token_data = token_resp.json()
-            access_token = token_data.get("access_token", "")
-            if not access_token:
+            if resp.status_code != 200:
                 error_msg = (
-                    f"无法获取 access_token：\n{token_data}\n\n"
-                    "请检查 AppID/Secret 是否正确，以及服务器 IP 是否在白名单中。"
+                    f"后端返回错误状态码 {resp.status_code}：\n{resp.text}"
                 )
                 return
 
-            # 2. 上传封面图（PNG→thumb / JPG→image）
-            fname = Path(filename).name
-            upload_resp = requests.post(
-                "https://api.weixin.qq.com/cgi-bin/material/add_material",
-                params={"access_token": access_token, "type": media_type},
-                files={"media": (fname, file_bytes, mime_type)},
-                timeout=30,
-            )
-            data = upload_resp.json()
-            thumb_id = data.get("media_id", "")
+            data = resp.json()
+            thumb_id = data.get("thumb_media_id", "")
             if not thumb_id:
-                error_msg = f"未获取到 media_id：\n{data}"
+                error_msg = f"后端未返回 thumb_media_id：\n{data}"
                 return
 
             self.wechat_thumb_media_id_edit.setText(thumb_id)
