@@ -7,9 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 import requests
-# from PySide6.QtCore import Qt, QThread, Signal
-# from PySide6.QtGui import QAction
-from PySide6.QtCore import QEvent, QRectF, QTimer, Qt, QThread, Signal
+from PySide6.QtCore import QEvent, QRectF, QSettings, QTimer, Qt, QThread, Signal
 from PySide6.QtGui import QAction, QColor, QPainter, QPen, QPainterPath
 from PySide6.QtWidgets import (
     QApplication,
@@ -236,11 +234,26 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("OpenClaw - 公众号写作助手")
         self.resize(960, 640)
 
+        # 本地配置持久化（豆包 / 公众号账号信息）
+        self._settings = QSettings("OpenClaw", "WeChatWriter")
+
         self._worker: Optional[GenerateWorker] = None
         self._last_topic: str = ""
 
         self._build_ui()
         self._build_menu()
+
+    def _save_account_settings(self) -> None:
+        """将豆包 / 公众号账号配置保存到本地。"""
+        self._settings.setValue("ark/api_key", self.ark_api_key_edit.text().strip())
+        self._settings.setValue("ark/model", self.ark_model_edit.text().strip())
+        self._settings.setValue("wechat/appid", self.wechat_appid_edit.text().strip())
+        self._settings.setValue(
+            "wechat/appsecret", self.wechat_appsecret_edit.text().strip()
+        )
+        self._settings.setValue(
+            "wechat/thumb_media_id", self.wechat_thumb_media_id_edit.text().strip()
+        )
 
     def _build_ui(self) -> None:
         central = QWidget(self)
@@ -323,11 +336,24 @@ class MainWindow(QMainWindow):
         self.wechat_thumb_media_id_edit = QLineEdit()
         self.wechat_thumb_media_id_edit.setPlaceholderText("封面图 ID")
 
-        self.ark_api_key_edit.setText(os.getenv("ARK_API_KEY", ""))
-        self.ark_model_edit.setText(os.getenv("ARK_MODEL", ""))
-        self.wechat_appid_edit.setText(os.getenv("WECHAT_APPID", ""))
-        self.wechat_appsecret_edit.setText(os.getenv("WECHAT_APPSECRET", ""))
-        self.wechat_thumb_media_id_edit.setText(os.getenv("WECHAT_THUMB_MEDIA_ID", ""))
+        # 优先读取本地配置，其次回退到环境变量
+        self.ark_api_key_edit.setText(
+            self._settings.value("ark/api_key", os.getenv("ARK_API_KEY", ""))
+        )
+        self.ark_model_edit.setText(
+            self._settings.value("ark/model", os.getenv("ARK_MODEL", ""))
+        )
+        self.wechat_appid_edit.setText(
+            self._settings.value("wechat/appid", os.getenv("WECHAT_APPID", ""))
+        )
+        self.wechat_appsecret_edit.setText(
+            self._settings.value("wechat/appsecret", os.getenv("WECHAT_APPSECRET", ""))
+        )
+        self.wechat_thumb_media_id_edit.setText(
+            self._settings.value(
+                "wechat/thumb_media_id", os.getenv("WECHAT_THUMB_MEDIA_ID", "")
+            )
+        )
 
         # 纵向：标签在上，输入框在下
         config_layout.addWidget(QLabel("豆包 Key"))
@@ -357,6 +383,12 @@ class MainWindow(QMainWindow):
         result_group = QGroupBox("生成结果")
         result_layout = QVBoxLayout(result_group)
 
+        warn_label = QLabel(
+            "注意：不理解 Markdown 格式的不要在此页面修改，"
+            "发送到公众号后在草稿箱修改即可！"
+        )
+        warn_label.setStyleSheet("color: #ff4d4f; font-size: 12px;")
+
         self.result_edit = QPlainTextEdit()
         self.result_edit.setPlaceholderText("生成后的 Markdown 显示在此。")
         self.result_edit.setLineWrapMode(QPlainTextEdit.NoWrap)
@@ -373,6 +405,7 @@ class MainWindow(QMainWindow):
         buttons_bar.addWidget(self.send_wechat_button)
         buttons_bar.addStretch(1)
 
+        result_layout.addWidget(warn_label)
         result_layout.addWidget(self.result_edit)
         result_layout.addLayout(buttons_bar)
 
@@ -423,6 +456,9 @@ class MainWindow(QMainWindow):
         if self._worker is not None and self._worker.isRunning():
             QMessageBox.information(self, "提示", "正在生成中，请稍候……")
             return
+
+        # 保存当前账号配置，方便下次启动自动带出
+        self._save_account_settings()
 
         self.generate_button.setEnabled(False)
         self.generate_button.setText("生成中...")
@@ -490,17 +526,13 @@ class MainWindow(QMainWindow):
         if not filename:
             return
 
-        # 根据扩展名判断上传类型和限制
+        # 根据扩展名判断上传类型（不再在客户端限制大小，交给微信接口自身校验）
         suffix = Path(filename).suffix.lower()
         if suffix == ".png":
-            media_type = "thumb"          # PNG → type=thumb，微信限制 ≤64KB
-            size_limit = 64 * 1024
-            size_desc = "64KB"
+            media_type = "thumb"          # PNG → type=thumb
             mime_type = "image/png"
         elif suffix in (".jpg", ".jpeg"):
-            media_type = "image"          # JPG → type=image，微信限制 ≤10MB
-            size_limit = 10 * 1024 * 1024
-            size_desc = "10MB"
+            media_type = "image"          # JPG → type=image
             mime_type = "image/jpeg"
         else:
             QMessageBox.warning(
@@ -518,6 +550,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "缺少配置", "请先填写公众号 AppID 和 Secret。")
             return
 
+        # 保存最新的公众号配置
+        self._save_account_settings()
+
         self.upload_thumb_button.setEnabled(False)
         self.upload_thumb_button.setText("上传中...")
         self._loading_overlay.show_overlay("正在上传封面图")
@@ -526,15 +561,6 @@ class MainWindow(QMainWindow):
         try:
             with open(filename, "rb") as f:
                 file_bytes = f.read()
-
-            # 大小校验
-            if len(file_bytes) > size_limit:
-                error_msg = (
-                    f"{suffix.upper()} 封面图不能超过 {size_desc}，"
-                    f"当前大小：{len(file_bytes) / 1024:.1f} KB。\n"
-                    "请压缩图片后重试。"
-                )
-                return
 
             # 1. 获取 access_token
             token_resp = requests.get(
@@ -615,7 +641,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "当前没有可发送的内容。")
             return
 
-        backend_base = os.getenv("BACKEND_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+        backend_base = os.getenv("BACKEND_BASE_URL", "http://49.235.172.63:8000/").rstrip("/")
         title = self._extract_title_from_markdown(text)
 
          # 从界面读取（可选）公众号配置，未填写则让后端使用默认 .env
@@ -632,6 +658,9 @@ class MainWindow(QMainWindow):
             payload["wechat_appsecret"] = wechat_appsecret
         if wechat_thumb_media_id:
             payload["wechat_thumb_media_id"] = wechat_thumb_media_id
+
+        # 保存当前账号配置
+        self._save_account_settings()
 
         self._loading_overlay.show_overlay("正在发送到公众号...")
         try:
