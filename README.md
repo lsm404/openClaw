@@ -35,6 +35,28 @@ source .venv/bin/activate  # Windows 使用 .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+### 运行桌面应用
+
+在项目根目录、已激活虚拟环境的前提下：
+
+```bash
+# macOS / Linux
+python -m openclaw.desktop_app
+
+# 或
+python run_desktop.py
+```
+
+```bash
+# Windows
+python -m openclaw.desktop_app
+
+# 或
+python run_desktop.py
+```
+
+> 若未创建 `run_desktop.py`，可直接用 `python -m openclaw.desktop_app` 启动。
+
 ### 配置 ARK Key（火山引擎）
 
 在项目根目录创建 `.env` 文件：

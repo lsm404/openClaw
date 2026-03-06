@@ -260,7 +260,6 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self._central_widget = central
 
-        layout = QHBoxLayout(central)
         left_col = QVBoxLayout()
         left_col.setContentsMargins(0, 0, 0, 0)
 
@@ -409,8 +408,22 @@ class MainWindow(QMainWindow):
         result_layout.addWidget(self.result_edit)
         result_layout.addLayout(buttons_bar)
 
-        layout.addLayout(left_col, 0)
-        layout.addWidget(result_group, 1)
+        # 主区域：左侧 + 右侧
+        main_v = QVBoxLayout(central)
+        top_widget = QWidget()
+        top_layout = QHBoxLayout(top_widget)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.addLayout(left_col, 0)
+        top_layout.addWidget(result_group, 1)
+        main_v.addWidget(top_widget)
+
+        # 水印：整窗底部，左右居中
+        watermark = QLabel("关注微信公众号「不贴心小助手」，获取更多内容！")
+        watermark.setStyleSheet(
+            "color: #1890ff; font-size: 13px; font-weight: 500; padding: 8px 0;"
+        )
+        watermark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_v.addWidget(watermark, 0, Qt.AlignmentFlag.AlignHCenter)
 
         # 加载遮罩（生成文章时显示）
         self._loading_overlay = LoadingOverlay(central, "正在生成文章...")
