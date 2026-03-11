@@ -270,8 +270,26 @@ class MainWindow(QMainWindow):
 
         self.topic_edit = QLineEdit()
         self.topic_edit.setPlaceholderText("必填")
-        self.audience_edit = QLineEdit()
-        self.style_edit = QLineEdit()
+
+        # 读者：改为枚举下拉，快速指定人群
+        self.audience_combo = QComboBox()
+        self.audience_combo.addItem("微信用户", "经常使用微信的普通用户")
+        self.audience_combo.addItem("不指定", "")
+        self.audience_combo.addItem("职场新人", "职场新人")
+        self.audience_combo.addItem("互联网打工人", "互联网打工人")
+        self.audience_combo.addItem("大学生", "大学生")
+        self.audience_combo.addItem("普通宝妈", "宝妈/宝爸等家庭用户")
+        self.audience_combo.addItem("小白用户", "几乎零基础的小白用户")
+        self.audience_combo.addItem("中小企业老板", "中小企业老板或个体经营者")
+       
+
+        # 风格：改为纯枚举下拉，不再手动输入
+        self.style_combo = QComboBox()
+        self.style_combo.addItem("不指定", "")
+        self.style_combo.addItem("科普聊天", "通俗易懂、像跟朋友聊天一样的科普风格。")
+        self.style_combo.addItem("职场干货", "结构清晰、观点明确、偏职场实战干货。")
+        self.style_combo.addItem("故事分享", "通过个人故事或案例来讲道理，轻松、有画面感。")
+        self.style_combo.addItem("运营拆解", "以拆解案例为主，有步骤、有数据、有总结。")
 
         self.length_combo = QComboBox()
         self.length_combo.addItem("中等", "medium")
@@ -285,14 +303,6 @@ class MainWindow(QMainWindow):
         self.mode_combo.addItem("清单文", "listicle")
         self.mode_combo.addItem("深度分析", "analysis")
 
-        self.style_preset_combo = QComboBox()
-        self.style_preset_combo.addItem("无", "")
-        self.style_preset_combo.addItem("科普聊天", "通俗易懂、像跟朋友聊天一样的科普风格。")
-        self.style_preset_combo.addItem("职场干货", "结构清晰、观点明确、偏职场实战干货。")
-        self.style_preset_combo.addItem("故事分享", "通过个人故事或案例来讲道理，轻松、有画面感。")
-        self.style_preset_combo.addItem("运营拆解", "以拆解案例为主，有步骤、有数据、有总结。")
-        self.style_preset_combo.currentIndexChanged.connect(self._on_style_preset_changed)
-
         self.generate_button = QPushButton("生成文章")
         self.generate_button.clicked.connect(self._on_generate_clicked)
 
@@ -301,13 +311,10 @@ class MainWindow(QMainWindow):
         article_layout.addWidget(self.topic_edit, r, 1)
         r += 1
         article_layout.addWidget(QLabel("读者"), r, 0)
-        article_layout.addWidget(self.audience_edit, r, 1)
+        article_layout.addWidget(self.audience_combo, r, 1)
         r += 1
         article_layout.addWidget(QLabel("风格"), r, 0)
-        article_layout.addWidget(self.style_edit, r, 1)
-        r += 1
-        article_layout.addWidget(QLabel("预设"), r, 0)
-        article_layout.addWidget(self.style_preset_combo, r, 1)
+        article_layout.addWidget(self.style_combo, r, 1)
         r += 1
         article_layout.addWidget(QLabel("长度"), r, 0)
         article_layout.addWidget(self.length_combo, r, 1)
@@ -447,20 +454,14 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
 
-    def _on_style_preset_changed(self) -> None:
-        preset = self.style_preset_combo.currentData()
-        # 只有当用户还没自己写风格时，才自动填充预设，避免覆盖用户输入
-        if preset and not self.style_edit.text().strip():
-            self.style_edit.setText(preset)
-
     def _on_generate_clicked(self) -> None:
         topic = self.topic_edit.text().strip()
         if not topic:
             QMessageBox.warning(self, "提示", "请先填写文章主题。")
             return
 
-        audience = self.audience_edit.text().strip() or None
-        style = self.style_edit.text().strip() or None
+        audience = self.audience_combo.currentData() or None
+        style = self.style_combo.currentData() or None
         length_value = self.length_combo.currentData()
         length: ArticleLength = length_value  # type: ignore[assignment]
         mode_value = self.mode_combo.currentData()
