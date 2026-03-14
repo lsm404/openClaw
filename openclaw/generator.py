@@ -27,8 +27,14 @@ class ArticleGenerator:
         style: Optional[str] = None,
         length: ArticleLength = "medium",
         mode: WritingMode = "standard",
+        system_prompt: Optional[str] = None,
     ) -> str:
-        system_prompt = build_article_system_prompt()
+        if system_prompt is None:
+            system_prompt = build_article_system_prompt()
+        # 内置：确保始终包含 Markdown 输出要求，避免用户自定义提示词时遗漏
+        _markdown_reminder = "默认输出为 Markdown 格式，方便复制到公众号编辑器。"
+        if system_prompt and _markdown_reminder not in system_prompt:
+            system_prompt = system_prompt.rstrip() + "\n- " + _markdown_reminder
         user_prompt = build_article_user_prompt(
             topic=topic,
             audience=audience,
