@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from .collapsible_box import CollapsibleBox
 from .config import load_config, OpenClawConfig
 from .generator import ArticleGenerator, ArticleLength, WritingMode
 from .prompt_templates import build_article_system_prompt
@@ -237,7 +238,9 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("OpenClaw - 公众号写作助手")
-        self.resize(1100, 720)
+        
+        # 设置固定窗口大小（不使用之前保存的大小）
+        self.setFixedSize(1100, 850)
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #f5f7fa;
@@ -413,135 +416,27 @@ class MainWindow(QMainWindow):
         left_col.setContentsMargins(12, 12, 6, 12)
         left_col.setSpacing(12)
 
-        # ---------- 文章 ----------
-        article_group = QGroupBox()
-        article_group.setStyleSheet(
-            "QGroupBox {"
-            "  background-color: white;"
-            "  border: 1px solid #e4e7eb;"
-            "  border-radius: 8px;"
-            "  padding: 16px;"
-            "}"
-        )
-        article_layout = QGridLayout(article_group)
-        article_layout.setColumnStretch(1, 1)
-        article_layout.setVerticalSpacing(10)
-        article_layout.setHorizontalSpacing(10)
+        # ── 账号配置折叠面板 ──────────────────────────
+        config_box = CollapsibleBox("账号配置")
 
-        self.topic_edit = QLineEdit()
-        self.topic_edit.setPlaceholderText("必填")
-
-        # 读者：改为枚举下拉，快速指定人群
-        self.audience_combo = QComboBox()
-        self.audience_combo.addItem("微信用户", "经常使用微信的普通用户")
-        self.audience_combo.addItem("不指定", "")
-        self.audience_combo.addItem("职场新人", "职场新人")
-        self.audience_combo.addItem("互联网打工人", "互联网打工人")
-        self.audience_combo.addItem("大学生", "大学生")
-        self.audience_combo.addItem("普通宝妈", "宝妈/宝爸等家庭用户")
-        self.audience_combo.addItem("小白用户", "几乎零基础的小白用户")
-        self.audience_combo.addItem("中小企业老板", "中小企业老板或个体经营者")
-       
-
-        # 风格：改为纯枚举下拉，不再手动输入
-        self.style_combo = QComboBox()
-        self.style_combo.addItem("不指定", "")
-        self.style_combo.addItem("科普聊天", "通俗易懂、像跟朋友聊天一样的科普风格。")
-        self.style_combo.addItem("职场干货", "结构清晰、观点明确、偏职场实战干货。")
-        self.style_combo.addItem("故事分享", "通过个人故事或案例来讲道理，轻松、有画面感。")
-        self.style_combo.addItem("运营拆解", "以拆解案例为主，有步骤、有数据、有总结。")
-
-        self.length_combo = QComboBox()
-        self.length_combo.addItem("中等", "medium")
-        self.length_combo.addItem("偏短", "short")
-        self.length_combo.addItem("偏长", "long")
-
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItem("标准干货", "standard")
-        self.mode_combo.addItem("故事化", "story")
-        self.mode_combo.addItem("案例拆解", "case_study")
-        self.mode_combo.addItem("清单文", "listicle")
-        self.mode_combo.addItem("深度分析", "analysis")
-
-        self.generate_button = QPushButton("生成文章")
-        self.generate_button.setMinimumHeight(36)
-        self.generate_button.setStyleSheet(
-            "QPushButton {"
-            "  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);"
-            "  color: white;"
-            "  font-weight: 600;"
-            "  padding: 8px 24px;"
-            "  border: none;"
-            "  border-radius: 6px;"
-            "  font-size: 14px;"
-            "  min-width: 100px;"
-            "}"
-            "QPushButton:hover {"
-            "  background: linear-gradient(135deg, #5568d3 0%, #6a4093 100%);"
-            "}"
-            "QPushButton:pressed {"
-            "  background: linear-gradient(135deg, #4c5bc7 0%, #5d3a84 100%);"
-            "}"
-            "QPushButton:disabled {"
-            "  background: #e5e7eb;"
-            "  color: #9ca3af;"
-            "}"
-        )
-        self.generate_button.clicked.connect(self._on_generate_clicked)
-
-        r = 0
-        article_title = QLabel("文章")
-        article_title.setStyleSheet(
-            "font-weight: 600; font-size: 15px; color: #111827; margin-bottom: 8px;"
-        )
-        article_layout.addWidget(article_title, r, 0, 1, 2)
-
-        def create_label(text: str) -> QLabel:
-            """创建统一样式的标签"""
-            label = QLabel(text)
-            label.setStyleSheet("color: #6b7280; font-size: 13px; font-weight: 500;")
-            return label
-
-        r += 1
-        article_layout.addWidget(create_label("主题"), r, 0)
-        article_layout.addWidget(self.topic_edit, r, 1)
-        r += 1
-        article_layout.addWidget(create_label("读者"), r, 0)
-        article_layout.addWidget(self.audience_combo, r, 1)
-        r += 1
-        article_layout.addWidget(create_label("风格"), r, 0)
-        article_layout.addWidget(self.style_combo, r, 1)
-        r += 1
-        article_layout.addWidget(create_label("长度"), r, 0)
-        article_layout.addWidget(self.length_combo, r, 1)
-        r += 1
-        article_layout.addWidget(create_label("模式"), r, 0)
-        article_layout.addWidget(self.mode_combo, r, 1)
-
-        # ---------- 账号配置 ----------
-        config_group = QGroupBox()
-        config_group.setStyleSheet(
-            "QGroupBox {"
-            "  background-color: white;"
-            "  border: 1px solid #e4e7eb;"
-            "  border-radius: 8px;"
-            "  padding: 16px;"
-            "}"
-        )
-        config_layout = QVBoxLayout(config_group)
-        config_layout.setSpacing(10)
+        def field_label(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setStyleSheet(
+                "color: #6b7280; font-size: 12px; font-weight: 500;"
+                "background: transparent; border: none;"
+            )
+            return lbl
 
         self.ark_api_key_edit = QLineEdit()
         self.ark_api_key_edit.setEchoMode(QLineEdit.Password)
-        self.ark_api_key_edit.setPlaceholderText("豆包 Key")
+        self.ark_api_key_edit.setPlaceholderText("请输入")
         self.ark_model_edit = QLineEdit()
-        self.ark_model_edit.setPlaceholderText("豆包模型 ID")
-
+        self.ark_model_edit.setPlaceholderText("请输入")
         self.wechat_appid_edit = QLineEdit()
-        self.wechat_appid_edit.setPlaceholderText("")
+        self.wechat_appid_edit.setPlaceholderText("请输入")
         self.wechat_appsecret_edit = QLineEdit()
         self.wechat_appsecret_edit.setEchoMode(QLineEdit.Password)
-        self.wechat_appsecret_edit.setPlaceholderText("")
+        self.wechat_appsecret_edit.setPlaceholderText("请输入")
         self.wechat_thumb_media_id_edit = QLineEdit()
         self.wechat_thumb_media_id_edit.setPlaceholderText("封面图 ID")
 
@@ -564,59 +459,119 @@ class MainWindow(QMainWindow):
             )
         )
 
-        # 纵向：标题在上，其次是标签 + 输入框
-        config_title = QLabel("账号配置")
-        config_title.setStyleSheet(
-            "font-weight: 600; font-size: 15px; color: #111827; margin-bottom: 8px;"
-        )
-        config_layout.addWidget(config_title)
-
-        def create_config_label(text: str) -> QLabel:
-            """创建配置标签"""
-            label = QLabel(text)
-            label.setStyleSheet("color: #6b7280; font-size: 13px; font-weight: 500; margin-top: 4px;")
-            return label
-
-        config_layout.addWidget(create_config_label("豆包 Key"))
-        config_layout.addWidget(self.ark_api_key_edit)
-        config_layout.addWidget(create_config_label("豆包模型"))
-        config_layout.addWidget(self.ark_model_edit)
-        config_layout.addWidget(create_config_label("公众号 AppID"))
-        config_layout.addWidget(self.wechat_appid_edit)
-        config_layout.addWidget(create_config_label("公众号 Secret"))
-        config_layout.addWidget(self.wechat_appsecret_edit)
-        config_layout.addWidget(create_config_label("封面图 thumb_media_id"))
         self.upload_thumb_button = QPushButton("📁 上传图片")
         self.upload_thumb_button.setToolTip(
             "PNG → type=thumb（≤64KB）\nJPG → type=image（≤10MB）\n上传后自动填入 thumb_media_id"
         )
         self.upload_thumb_button.setStyleSheet(
             "QPushButton {"
-            "  background-color: #f0f9ff;"
-            "  color: #0369a1;"
-            "  border: 1px solid #bae6fd;"
-            "  border-radius: 6px;"
-            "  padding: 6px 14px;"
-            "  font-size: 13px;"
+            "  background-color: #f0f9ff; color: #0369a1;"
+            "  border: 1px solid #bae6fd; border-radius: 6px;"
+            "  padding: 6px 14px; font-size: 13px;"
             "}"
-            "QPushButton:hover {"
-            "  background-color: #e0f2fe;"
-            "  border-color: #7dd3fc;"
-            "}"
-            "QPushButton:pressed {"
-            "  background-color: #bae6fd;"
-            "}"
+            "QPushButton:hover { background-color: #e0f2fe; border-color: #7dd3fc; }"
+            "QPushButton:pressed { background-color: #bae6fd; }"
         )
         self.upload_thumb_button.clicked.connect(self._on_upload_thumb_clicked)
-        config_layout.addWidget(self.upload_thumb_button)
-        config_layout.addWidget(self.wechat_thumb_media_id_edit)
+
         thumb_hint = QLabel("支持 PNG/JPG，自动识别格式")
-        thumb_hint.setStyleSheet("color: #9ca3af; font-size: 11px;")
-        config_layout.addWidget(thumb_hint)
+        thumb_hint.setStyleSheet(
+            "color: #9ca3af; font-size: 11px; background: transparent; border: none;"
+        )
+
+        for lbl_text, widget in [
+            ("豆包 Key", self.ark_api_key_edit),
+            ("豆包模型", self.ark_model_edit),
+            ("公众号 AppID", self.wechat_appid_edit),
+            ("公众号 Secret", self.wechat_appsecret_edit),
+        ]:
+            config_box.add_widget(field_label(lbl_text))
+            config_box.add_widget(widget)
+
+        config_box.add_widget(field_label("封面图 thumb_media_id"))
+        config_box.add_widget(self.upload_thumb_button)
+        config_box.add_widget(self.wechat_thumb_media_id_edit)
+        config_box.add_widget(thumb_hint)
+
+        # ── 文章折叠面板 ──────────────────────────────
+        article_box = CollapsibleBox("文章")
+
+        self.topic_edit = QLineEdit()
+        self.topic_edit.setPlaceholderText("必填")
+
+        self.audience_combo = QComboBox()
+        self.audience_combo.addItem("微信用户", "经常使用微信的普通用户")
+        self.audience_combo.addItem("不指定", "")
+        self.audience_combo.addItem("职场新人", "职场新人")
+        self.audience_combo.addItem("互联网打工人", "互联网打工人")
+        self.audience_combo.addItem("大学生", "大学生")
+        self.audience_combo.addItem("普通宝妈", "宝妈/宝爸等家庭用户")
+        self.audience_combo.addItem("小白用户", "几乎零基础的小白用户")
+        self.audience_combo.addItem("中小企业老板", "中小企业老板或个体经营者")
+
+        self.style_combo = QComboBox()
+        self.style_combo.addItem("不指定", "")
+        self.style_combo.addItem("科普聊天", "通俗易懂、像跟朋友聊天一样的科普风格。")
+        self.style_combo.addItem("职场干货", "结构清晰、观点明确、偏职场实战干货。")
+        self.style_combo.addItem("故事分享", "通过个人故事或案例来讲道理，轻松、有画面感。")
+        self.style_combo.addItem("运营拆解", "以拆解案例为主，有步骤、有数据、有总结。")
+
+        self.length_combo = QComboBox()
+        self.length_combo.addItem("中等", "medium")
+        self.length_combo.addItem("偏短", "short")
+        self.length_combo.addItem("偏长", "long")
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("标准干货", "standard")
+        self.mode_combo.addItem("故事化", "story")
+        self.mode_combo.addItem("案例拆解", "case_study")
+        self.mode_combo.addItem("清单文", "listicle")
+        self.mode_combo.addItem("深度分析", "analysis")
+
+        self.generate_button = QPushButton("✨ 生成文章")
+        self.generate_button.setMinimumHeight(40)
+        self.generate_button.setMinimumWidth(120)
+        self.generate_button.setStyleSheet(
+            "QPushButton {"
+            "  background-color: #667eea; color: #ffffff;"
+            "  font-weight: 600; padding: 10px 28px;"
+            "  border: none; border-radius: 8px; font-size: 15px;"
+            "}"
+            "QPushButton:hover { background-color: #5568d3; }"
+            "QPushButton:pressed { background-color: #4c5bc7; }"
+            "QPushButton:disabled { background-color: #e5e7eb; color: #9ca3af; }"
+        )
+        self.generate_button.clicked.connect(self._on_generate_clicked)
+
+        # 用 Grid 布局排列标签和控件（标签靠左，控件拉伸）
+        article_grid_widget = QWidget()
+        article_grid_widget.setStyleSheet("background: transparent; border: none;")
+        article_grid = QGridLayout(article_grid_widget)
+        article_grid.setContentsMargins(0, 0, 0, 0)
+        article_grid.setColumnStretch(1, 1)
+        article_grid.setVerticalSpacing(8)
+        article_grid.setHorizontalSpacing(10)
+
+        for row, (lbl_text, widget) in enumerate([
+            ("主题", self.topic_edit),
+            ("读者", self.audience_combo),
+            ("风格", self.style_combo),
+            ("长度", self.length_combo),
+            ("模式", self.mode_combo),
+        ]):
+            lbl = QLabel(lbl_text)
+            lbl.setStyleSheet(
+                "color: #6b7280; font-size: 13px; font-weight: 500;"
+                "background: transparent; border: none;"
+            )
+            article_grid.addWidget(lbl, row, 0)
+            article_grid.addWidget(widget, row, 1)
+
+        article_box.add_widget(article_grid_widget)
 
         # 左侧整体顺序：先账号配置，再文章
-        left_col.addWidget(config_group)
-        left_col.addWidget(article_group)
+        left_col.addWidget(config_box)
+        left_col.addWidget(article_box)
 
 
         # 提示词编辑区（系统提示词）
@@ -645,10 +600,12 @@ class MainWindow(QMainWindow):
             "  border: 1px solid #e4e7eb;"
             "  border-radius: 8px;"
             "  padding: 20px;"
+            "  margin-left: 0px;"
             "}"
         )
         result_layout = QVBoxLayout(result_group)
-        result_layout.setSpacing(12)
+        result_layout.setSpacing(15)
+        result_layout.setContentsMargins(0, 0, 0, 0)
 
         title_label = QLabel("生成结果")
         title_label.setStyleSheet(
@@ -764,12 +721,15 @@ class MainWindow(QMainWindow):
         )
         self.reset_prompt_button.clicked.connect(self._on_reset_prompt_clicked)
 
-        prompt_row = QHBoxLayout()
-        prompt_row.addWidget(prompt_label)
-        prompt_row.addStretch(1)
-        prompt_row.addWidget(self.reset_prompt_button)
-        prompt_row.addWidget(self.generate_button)
-        result_layout.addLayout(prompt_row)
+        # 顶部操作栏：提示词标签 + 按钮组
+        top_bar = QHBoxLayout()
+        top_bar.setSpacing(12)
+        top_bar.addWidget(prompt_label)
+        top_bar.addStretch(1)
+        top_bar.addWidget(self.reset_prompt_button)
+        top_bar.addWidget(self.generate_button)
+        
+        result_layout.addLayout(top_bar)
         result_layout.addWidget(self.prompt_edit)
         result_layout.addWidget(title_label)
         result_layout.addWidget(warn_label)
