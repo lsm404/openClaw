@@ -9,6 +9,7 @@ from typing import Optional
 import requests
 from PySide6.QtCore import QEvent, QRectF, QSettings, QTimer, Qt, QThread, Signal
 from PySide6.QtGui import QAction, QColor, QPainter, QPen, QPainterPath
+from PySide6.QtWidgets import QGraphicsDropShadowEffect
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QScrollArea,
     QWidget,
     QVBoxLayout,
 )
@@ -240,7 +242,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("OpenClaw - 公众号写作助手")
         
         # 设置固定窗口大小（不使用之前保存的大小）
-        self.setFixedSize(1100, 850)
+        self.setFixedSize(1100, 750)
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #f5f7fa;
@@ -249,8 +251,8 @@ class MainWindow(QMainWindow):
                 background-color: white;
                 border: 1px solid #e4e7eb;
                 border-radius: 8px;
-                padding: 16px;
-                margin-top: 8px;
+                padding: 4px;
+                margin-top: 0px;
             }
             QLabel {
                 color: #1f2937;
@@ -304,23 +306,24 @@ class MainWindow(QMainWindow):
                 border-top-color: #6366f1;
             }
             QComboBox QAbstractItemView {
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-                background-color: white;
+                border: 1px solid #c7d2fe;
+                border-radius: 6px;
+                background-color: #eef2ff;
                 outline: none;
-                padding: 4px;
+                padding: 0px;
                 selection-background-color: #6366f1;
                 selection-color: white;
-                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
             }
             QComboBox QAbstractItemView::item {
                 padding: 8px 12px;
-                border-radius: 4px;
-                margin: 2px 0px;
-                min-height: 20px;
+                border-radius: 0px;
+                margin: 0px;
+                min-height: 22px;
+                background-color: #eef2ff;
+                color: #111827;
             }
             QComboBox QAbstractItemView::item:hover {
-                background-color: #f3f4f6;
+                background-color: #c7d2fe;
                 color: #111827;
             }
             QComboBox QAbstractItemView::item:selected {
@@ -413,7 +416,7 @@ class MainWindow(QMainWindow):
         self._central_widget = central
 
         left_col = QVBoxLayout()
-        left_col.setContentsMargins(12, 12, 6, 12)
+        left_col.setContentsMargins(12, 12, 12, 12)
         left_col.setSpacing(12)
 
         # ── 账号配置折叠面板 ──────────────────────────
@@ -527,6 +530,24 @@ class MainWindow(QMainWindow):
         self.mode_combo.addItem("案例拆解", "case_study")
         self.mode_combo.addItem("清单文", "listicle")
         self.mode_combo.addItem("深度分析", "analysis")
+
+        # 给所有下拉框的弹出视图加投影 + 背景色，产生层次感
+        def _apply_combo_popup_style(combo: QComboBox) -> None:
+            shadow = QGraphicsDropShadowEffect()
+            shadow.setBlurRadius(18)
+            shadow.setOffset(0, 4)
+            shadow.setColor(QColor(0, 0, 0, 70))
+            combo.view().setGraphicsEffect(shadow)
+            # viewport 是实际可见区域，必须单独设置背景色
+            combo.view().viewport().setStyleSheet(
+                "background-color: #eef2ff;"
+            )
+
+        for _combo in (
+            self.audience_combo, self.style_combo,
+            self.length_combo, self.mode_combo,
+        ):
+            _apply_combo_popup_style(_combo)
 
         self.generate_button = QPushButton("✨ 生成文章")
         self.generate_button.setMinimumHeight(40)
@@ -644,7 +665,7 @@ class MainWindow(QMainWindow):
             "  color: #374151;"
             "  border: 1px solid #d1d5db;"
             "  border-radius: 6px;"
-            "  padding: 6px 14px;"
+            "  padding: 3px 12px;"
             "  font-size: 13px;"
             "}"
             "QPushButton:hover {"
@@ -664,7 +685,7 @@ class MainWindow(QMainWindow):
             "  color: #dc2626;"
             "  border: 1px solid #fecaca;"
             "  border-radius: 6px;"
-            "  padding: 6px 14px;"
+            "  padding: 3px 12px;"
             "  font-size: 13px;"
             "}"
             "QPushButton:hover {"
@@ -683,7 +704,7 @@ class MainWindow(QMainWindow):
             "  color: white;"
             "  border: none;"
             "  border-radius: 6px;"
-            "  padding: 6px 16px;"
+            "  padding: 3px 12px;"
             "  font-size: 13px;"
             "  font-weight: 500;"
             "}"
@@ -738,25 +759,36 @@ class MainWindow(QMainWindow):
 
         # 主区域：左侧 + 右侧（顶部对齐）
         main_v = QVBoxLayout(central)
+        main_v.setContentsMargins(0, 0, 0, 0)
         top_widget = QWidget()
         top_layout = QHBoxLayout(top_widget)
-        top_layout.setContentsMargins(6, 12, 12, 12)
+        top_layout.setContentsMargins(6, 4, 12, 6)
         top_layout.setSpacing(12)
-        top_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         left_widget = QWidget()
         left_widget.setContentsMargins(0, 0, 0, 0)
         left_widget.setLayout(left_col)
 
-        top_layout.addWidget(left_widget, 0)
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFixedWidth(280)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        left_scroll.setStyleSheet(
+            "QScrollArea { border: none; background: transparent; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        left_scroll.setWidget(left_widget)
+
+        top_layout.addWidget(left_scroll, 0)
         top_layout.addWidget(result_group, 1)
-        main_v.addWidget(top_widget)
+        main_v.addWidget(top_widget, 1)
 
         # 水印：整窗底部，左右居中
         watermark = QLabel("✨ 关注微信公众号「不贴心小助手」，获取更多内容！")
         watermark.setStyleSheet(
             "color: #6366f1; font-size: 13px; font-weight: 500; "
-            "padding: 12px 0; background-color: transparent;"
+            "padding: 2px 0; background-color: transparent;"
         )
         watermark.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_v.addWidget(watermark, 0, Qt.AlignmentFlag.AlignHCenter)
