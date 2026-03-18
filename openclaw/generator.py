@@ -43,6 +43,11 @@ class ArticleGenerator:
             mode=mode,
         )
 
+        # 可选：为模型开启联网（web_search 工具）
+        extra_kwargs: dict = {}
+        if self._config.enable_web_search:
+            extra_kwargs["tools"] = [{"type": "web_search"}]
+
         completion = self._client.responses.create(
             model=self._config.model,
             input=[
@@ -54,6 +59,7 @@ class ArticleGenerator:
                     ],
                 }
             ],
+            **extra_kwargs,
         )
 
         # 从 output[0].content 中拼接文本，避免某些实现里对 output_text 进行 JSON 转义

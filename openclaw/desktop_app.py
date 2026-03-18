@@ -12,6 +12,7 @@ from PySide6.QtGui import QAction, QColor, QPainter, QPen, QPainterPath
 from PySide6.QtWidgets import QGraphicsDropShadowEffect
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -407,6 +408,10 @@ class MainWindow(QMainWindow):
         """将豆包 / 公众号账号配置保存到本地。"""
         self._settings.setValue("ark/api_key", self.ark_api_key_edit.text().strip())
         self._settings.setValue("ark/model", self.ark_model_edit.text().strip())
+        self._settings.setValue(
+            "ark/enable_web_search",
+            "1" if self.enable_web_search_checkbox.isChecked() else "0",
+        )
         self._settings.setValue("wechat/appid", self.wechat_appid_edit.text().strip())
         self._settings.setValue(
             "wechat/appsecret", self.wechat_appsecret_edit.text().strip()
@@ -440,6 +445,35 @@ class MainWindow(QMainWindow):
         self.ark_api_key_edit.setPlaceholderText("请输入")
         self.ark_model_edit = QLineEdit()
         self.ark_model_edit.setPlaceholderText("请输入")
+        self.enable_web_search_checkbox = QCheckBox("🌐 联网生成")
+        self.enable_web_search_checkbox.setStyleSheet("QCheckBox { font-size: 16px; }")
+        self.enable_web_search_checkbox.setToolTip(
+            "开启后模型可联网搜索最新信息辅助写作\n需要在火山引擎控制台开通 web_search 能力"
+        )
+        # 选中时显示对勾，优化文字与图标间距
+        _check_svg = (
+            "data:image/svg+xml;base64,"
+            "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+"
+            "PHBhdGggZmlsbD0ibm9uZSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2Ut"
+            "bGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGQ9Ik0zIDhsMyAzIDctNyIv"
+            "Pjwvc3ZnPg=="
+        )
+        self.enable_web_search_checkbox.setStyleSheet(
+            "QCheckBox {"
+            "  color: #6b7280; font-size: 13px; font-weight: 500;"
+            "  background: transparent; border: none;"
+            "  spacing: 10px;"
+            "}"
+            "QCheckBox::indicator {"
+            "  width: 18px; height: 18px; border-radius: 4px;"
+            "  border: 1px solid #d1d5db;"
+            "  background-color: white;"
+            "}"
+            "QCheckBox::indicator:checked {"
+            "  background-color: #6366f1; border-color: #6366f1;"
+            f"  image: url({_check_svg});"
+            "}"
+        )
         self.wechat_appid_edit = QLineEdit()
         self.wechat_appid_edit.setPlaceholderText("请输入")
         self.wechat_appsecret_edit = QLineEdit()
@@ -466,6 +500,20 @@ class MainWindow(QMainWindow):
                 "wechat/thumb_media_id", os.getenv("WECHAT_THUMB_MEDIA_ID", "")
             )
         )
+        # 联网开关：本地优先，其次回退到环境变量 ARK_ENABLE_WEB_SEARCH
+        enable_web_search_default = os.getenv("ARK_ENABLE_WEB_SEARCH", "0").strip()
+        enable_web_search_flag = enable_web_search_default.lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        enable_web_search_value = self._settings.value(
+            "ark/enable_web_search", "1" if enable_web_search_flag else "0"
+        )
+        self.enable_web_search_checkbox.setChecked(
+            str(enable_web_search_value).lower() in {"1", "true", "yes", "on"}
+        )
 
         self.upload_thumb_button = QPushButton("📁 上传图片")
         self.upload_thumb_button.setToolTip(
@@ -490,6 +538,10 @@ class MainWindow(QMainWindow):
         for lbl_text, widget in [
             ("豆包 Key", self.ark_api_key_edit),
             ("豆包模型", self.ark_model_edit),
+        ]:
+            config_box.add_widget(field_label(lbl_text))
+            config_box.add_widget(widget)
+        for lbl_text, widget in [
             ("公众号 AppID", self.wechat_appid_edit),
             ("公众号 Secret", self.wechat_appsecret_edit),
         ]:
@@ -592,6 +644,10 @@ class MainWindow(QMainWindow):
             )
             article_grid.addWidget(lbl, row, 0)
             article_grid.addWidget(widget, row, 1)
+
+        # 联网开关放在最后一行，跨两列
+        next_row = len([("主题",), ("读者",), ("风格",), ("长度",), ("模式",)])
+        article_grid.addWidget(self.enable_web_search_checkbox, next_row, 0, 1, 2)
 
         article_box.add_widget(article_grid_widget)
 
@@ -865,6 +921,7 @@ class MainWindow(QMainWindow):
                 api_key=ark_key,
                 base_url=base_url,
                 model=ark_model,
+                enable_web_search=self.enable_web_search_checkbox.isChecked(),
             )
 
         self._worker = GenerateWorker(

@@ -13,6 +13,8 @@ class OpenClawConfig:
     base_url: str
     model: str
     max_retries: int = 3
+    # 是否为模型开启联网（web_search 工具）
+    enable_web_search: bool = False
 
 
 def load_config() -> OpenClawConfig:
@@ -29,5 +31,14 @@ def load_config() -> OpenClawConfig:
     if not model:
         raise RuntimeError("未找到 ARK_MODEL，请在 .env 中配置你要使用的模型 ID。")
 
-    return OpenClawConfig(api_key=api_key, base_url=base_url, model=model)
+    # 是否启用联网搜索（web_search 工具）
+    enable_web_search = os.getenv("ARK_ENABLE_WEB_SEARCH", "0").strip()
+    enable_web_search_flag = enable_web_search.lower() in {"1", "true", "yes", "on"}
+
+    return OpenClawConfig(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        enable_web_search=enable_web_search_flag,
+    )
 
