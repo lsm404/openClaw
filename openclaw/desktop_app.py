@@ -262,6 +262,7 @@ class MainWindow(QMainWindow):
                 border-radius: 6px;
                 padding: 8px 12px;
                 background-color: white;
+                color: #111827;
                 font-size: 13px;
                 selection-background-color: #e0e7ff;
                 selection-color: #1f2937;
@@ -278,8 +279,10 @@ class MainWindow(QMainWindow):
                 padding: 8px 12px;
                 padding-right: 30px;
                 background-color: white;
+                color: #111827;
                 font-size: 13px;
                 selection-background-color: #e0e7ff;
+                selection-color: #1f2937;
             }
             QComboBox:hover {
                 border-color: #9ca3af;
@@ -309,6 +312,7 @@ class MainWindow(QMainWindow):
                 border: 1px solid #c7d2fe;
                 border-radius: 6px;
                 background-color: #eef2ff;
+                color: #111827;
                 outline: none;
                 padding: 0px;
                 selection-background-color: #6366f1;
@@ -356,6 +360,7 @@ class MainWindow(QMainWindow):
                 border-radius: 6px;
                 padding: 8px;
                 background-color: white;
+                color: #111827;
                 font-size: 13px;
                 selection-background-color: #e0e7ff;
                 selection-color: #1f2937;
@@ -607,6 +612,7 @@ class MainWindow(QMainWindow):
             "  border: 1px solid #d1d5db;"
             "  border-radius: 6px;"
             "  background-color: #f9fafb;"
+            "  color: #111827;"
             "  font-size: 12px;"
             "  padding: 10px;"
             "  line-height: 1.5;"
@@ -650,6 +656,7 @@ class MainWindow(QMainWindow):
             "  border: 1px solid #d1d5db;"
             "  border-radius: 6px;"
             "  background-color: #fafbfc;"
+            "  color: #111827;"
             "  font-family: 'SF Mono', Consolas, Menlo, monospace;"
             "  font-size: 13px;"
             "  line-height: 1.6;"
