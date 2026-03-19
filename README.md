@@ -1,27 +1,25 @@
-## OpenClaw 自动写公众号工具
+## OpenClaw 小说写作助手
 
-**OpenClaw** 是一个本地运行的小工具，帮助你快速生成公众号文章草稿（标题 / 大纲 / 正文），然后你可以在公众号后台进行人工润色和发布。
+**OpenClaw** 是一个本地运行的小说写作工具，支持短篇/长篇连载，每日续写，前后内容连贯。
 
 ### 功能特性
 
-- **一键生成整篇文章**：根据主题、目标读者、风格自动生成「标题 + 大纲 + 正文」。
-- **多种写作风格**：支持科普风、职场风、故事风等预设风格，也支持自定义提示词。
-- **结构化输出**：自动生成分节小标题，方便直接粘贴到微信公众号编辑器。
-- **草稿而非终稿**：定位是「高质量初稿生成器」，方便你二次编辑，而不是完全自动发布。
+- **连载续写**：按章节生成，支持短篇、长篇
+- **前后连贯**：自动维护前情摘要，每章自动生成摘要供续写使用
+- **JSON 存储**：小说与章节以 JSON 文件保存，便于备份与迁移
+- **导出 Markdown**：支持导出整本小说为 Markdown 文件
 
 ### 目录结构
 
 ```text
 openclaw/
   __init__.py
-  config.py          # 配置 & ARK/OpenAI 兼容调用
-  prompt_templates.py# 提示词模板
-  generator.py       # 核心生成逻辑
+  config.py          # ARK 模型配置
+  novel_store.py     # 小说 JSON 存储
+  novel_prompts.py   # 小说提示词模板
+  novel_generator.py # 续写与摘要生成
   cli.py             # 命令行入口
-  desktop_app.py     # 桌面应用入口
-wechat_backend/
-  app.py             # 微信公众号草稿后端（FastAPI）
-  config.py          # 公众号配置
+  desktop_app.py     # 桌面应用
 requirements.txt
 README.md
 ```
@@ -37,81 +35,37 @@ pip install -r requirements.txt
 
 ### 运行桌面应用
 
-在项目根目录、已激活虚拟环境的前提下：
-
 ```bash
-# macOS / Linux
-python -m openclaw.desktop_app
-
-# 或
+# 方式一
 python run_desktop.py
+
+# 方式二
+python -m openclaw
+
+# 方式三
+python -m openclaw run
 ```
 
-```bash
-# Windows
-python -m openclaw.desktop_app
+### 配置
 
-# 或
-python run_desktop.py
-```
-
-> 若未创建 `run_desktop.py`，可直接用 `python -m openclaw.desktop_app` 启动。
-
-### 配置 ARK Key（火山引擎）
-
-在项目根目录创建 `.env` 文件：
+在项目根目录创建 `.env` 文件（可选，也可在界面中填写）：
 
 ```bash
 ARK_API_KEY=你的_ARK_key
-ARK_MODEL=你的模型ID_例如_doubao-seed-1.6-flash-250828
+ARK_MODEL=你的模型ID
 ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-
-# 可选：发送到公众号草稿相关
-WECHAT_APPID=你的公众号appid
-WECHAT_APPSECRET=你的公众号appsecret
-WECHAT_THUMB_MEDIA_ID=一张封面图的thumb_media_id
-WECHAT_BASE_URL=https://api.weixin.qq.com
-
-# 可选：桌面应用调用后端的地址
-BACKEND_BASE_URL=http://127.0.0.1:8000
 ```
 
-> **注意**：`.env` 只保存在本地，不要提交到任何远端仓库。
+### 使用流程
 
-### 启动公众号草稿后端
+1. 点击「新建」创建小说，填写标题和简介
+2. 在「小说配置」中完善简介、人物、类型（短篇/长篇）
+3. 在「模型配置」中填写豆包 Key 和模型 ID
+4. 点击「生成下一章」开始续写
+5. 可选填写「本章梗概」引导生成方向
+6. 生成完成后自动生成本章摘要，供后续章节连贯使用
+7. 可随时切换章节编辑，或导出整本为 Markdown
 
-```bash
-cd /Users/edy/Documents/ower/auto
-source .venv/bin/activate
-uvicorn wechat_backend.app:app --reload
-```
+### 数据存储
 
-后端默认监听在 `http://127.0.0.1:8000`，桌面应用会通过 `BACKEND_BASE_URL` 调用 `/wechat/draft` 接口，把当前生成的 Markdown 文章推到公众号草稿箱。
-
-### 命令行用法
-
-生成一篇文章草稿（标题 + 大纲 + 正文）：
-
-```bash
-python -m openclaw \
-  --topic "AI 如何帮助普通人写公众号" \
-  --audience "职场白领" \
-  --style "科普+轻松聊天" \
-  --length medium \
-  --output article.md
-```
-
-主要参数说明：
-
-- `--topic`：文章主题（必填）。
-- `--audience`：目标读者画像，例如「程序员」「职场新人」等。
-- `--style`：写作风格描述，例如「严肃科普」「故事化」「鸡汤文」等。
-- `--length`：文章长度，`short` / `medium` / `long`。
-- `--output`：输出 markdown 文件名，默认为 `openclaw_article.md`。
-
-### 开发计划（可后续扩展）
-
-- 支持多篇文章批量生成（给出多个 topic 列表）。
-- 支持从提示词模板库中选择「选题框架」。
-- 支持把生成结果拆分为多条朋友圈 / 视频号脚本。
-
+小说数据保存在 `~/.openclaw/novels/` 目录，每个小说一个 JSON 文件。

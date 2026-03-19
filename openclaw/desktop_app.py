@@ -1,44 +1,42 @@
+"""
+OpenClaw 小说写作助手 - 桌面应用
+"""
 from __future__ import annotations
 
 import os
-import re
-import sys
+import uuid
 from pathlib import Path
 from typing import Optional
 
-import requests
 from PySide6.QtCore import QEvent, QRectF, QSettings, QTimer, Qt, QThread, Signal
 from PySide6.QtGui import QAction, QColor, QPainter, QPen, QPainterPath
-from PySide6.QtWidgets import QGraphicsDropShadowEffect
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
-    QGridLayout,
-    QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
-    QPushButton,
     QPlainTextEdit,
-    QScrollArea,
-    QWidget,
+    QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 
 from .collapsible_box import CollapsibleBox
 from .config import load_config, OpenClawConfig
-from .generator import ArticleGenerator, ArticleLength, WritingMode
-from .prompt_templates import build_article_system_prompt
+from .novel_generator import generate_chapter_summary, generate_next_chapter
+from .novel_store import Chapter, Novel, create_novel, list_novels, load_novel, save_novel
 
 
 class LoadingSpinner(QWidget):
-    """渐变色圆弧旋转动画，带尾迹渐隐效果"""
-
     def __init__(self, size: int = 56, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._size = size
@@ -47,7 +45,7 @@ class LoadingSpinner(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(16)  # ~60fps
+        self._timer.start(16)
 
     def _tick(self) -> None:
         self._angle = (self._angle + 6) % 360
@@ -59,19 +57,13 @@ class LoadingSpinner(QWidget):
         s = self._size
         pad = 5
         rect = QRectF(pad, pad, s - pad * 2, s - pad * 2)
-
-        # 圆形背景（与卡片颜色一致，消除突兀感）
         qp.setPen(Qt.PenStyle.NoPen)
         qp.setBrush(QColor(99, 102, 241, 230))
         qp.drawEllipse(rect)
-
-        # 背景圆环（白色低透明度轨道）
         pen = QPen(QColor(255, 255, 255, 50), 5, Qt.PenStyle.SolidLine)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         qp.setPen(pen)
         qp.drawArc(rect.toRect(), 0, 360 * 16)
-
-        # 渐变色尾迹弧：从透明→白色，弧长270°
         arc_len = 270
         steps = 18
         for i in range(steps):
@@ -86,8 +78,6 @@ class LoadingSpinner(QWidget):
 
 
 class _DotLabel(QLabel):
-    """三点轮流高亮跳动"""
-
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._idx = 0
@@ -110,19 +100,14 @@ class _DotLabel(QLabel):
 
 
 class LoadingOverlay(QWidget):
-    """现代感半透明遮罩 + 居中加载卡片，支持淡入/淡出"""
-
     def __init__(self, parent: QWidget, message: str = "加载中") -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.setWindowOpacity(0.0)
         self.hide()
-
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        # 卡片：深色毛玻璃风格
         card = QFrame(self)
         card.setObjectName("LoadingCard")
         card.setStyleSheet("""
@@ -130,32 +115,22 @@ class LoadingOverlay(QWidget):
                 background-color: rgba(99, 102, 241, 230);
                 border-radius: 16px;
                 border: 1px solid rgba(255, 255, 255, 0.3);
-                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
             }
         """)
         card.setMinimumWidth(220)
-        card.setMaximumWidth(320)
-
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(36, 28, 36, 28)
         card_layout.setSpacing(20)
         card_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
         self._spinner = LoadingSpinner(56, card)
         card_layout.addWidget(self._spinner, 0, Qt.AlignmentFlag.AlignHCenter)
-
         self._label = _DotLabel(card)
         self._label.setTextFormat(Qt.TextFormat.RichText)
-        self._label.setStyleSheet(
-            "color: rgba(230,230,230,220); font-size: 14px; font-weight: 500;"
-        )
+        self._label.setStyleSheet("color: rgba(230,230,230,220); font-size: 14px;")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.set_base(message)
         card_layout.addWidget(self._label, 0, Qt.AlignmentFlag.AlignHCenter)
-
         layout.addWidget(card)
-
-        # 用 QGraphicsOpacityEffect 做淡入/淡出（对子 widget 有效）
         from PySide6.QtCore import QPropertyAnimation, QEasingCurve
         from PySide6.QtWidgets import QGraphicsOpacityEffect
         self._effect = QGraphicsOpacityEffect(self)
@@ -167,7 +142,6 @@ class LoadingOverlay(QWidget):
         self._anim.finished.connect(self._on_anim_done)
 
     def paintEvent(self, event: QEvent) -> None:
-        """绘制半透明深色遮罩背景"""
         qp = QPainter(self)
         qp.fillRect(self.rect(), QColor(0, 0, 0, 120))
 
@@ -196,182 +170,92 @@ class LoadingOverlay(QWidget):
             self.hide()
 
 
-class GenerateWorker(QThread):
+class NovelChapterWorker(QThread):
     finished = Signal(str)
     failed = Signal(str)
 
     def __init__(
         self,
-        topic: str,
-        audience: Optional[str],
-        style: Optional[str],
-        length: ArticleLength,
-        mode: WritingMode,
-        system_prompt: Optional[str],
-        config_override: Optional[OpenClawConfig] = None,
+        novel: Novel,
+        chapter_hint: str,
+        config: OpenClawConfig,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self._topic = topic
-        self._audience = audience
-        self._style = style
-        self._length = length
-        self._mode = mode
-        self._system_prompt = system_prompt
-        self._config_override = config_override
+        self._novel = novel
+        self._chapter_hint = chapter_hint
+        self._config = config
 
     def run(self) -> None:
         try:
-            config = self._config_override or load_config()
-            generator = ArticleGenerator(config)
-            content = generator.generate(
-                topic=self._topic,
-                audience=self._audience,
-                style=self._style,
-                length=self._length,
-                mode=self._mode,
-                system_prompt=self._system_prompt,
+            content = generate_next_chapter(
+                self._config,
+                self._novel,
+                chapter_hint=self._chapter_hint,
             )
             self.finished.emit(content)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class SummaryWorker(QThread):
+    finished = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, content: str, config: OpenClawConfig, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._content = content
+        self._config = config
+
+    def run(self) -> None:
+        try:
+            summary = generate_chapter_summary(self._config, self._content)
+            self.finished.emit(summary)
+        except Exception as exc:
             self.failed.emit(str(exc))
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("OpenClaw - 公众号写作助手")
-        
-        # 设置固定窗口大小（不使用之前保存的大小）
-        self.setFixedSize(1100, 750)
+        self.setWindowTitle("OpenClaw - 小说写作助手")
+        self.setFixedSize(1100, 700)
+
+        self._settings = QSettings("OpenClaw", "NovelWriter")
+        self._novel: Optional[Novel] = None
+        self._current_chapter_index: int = -1
+        self._suppress_chapter_save: bool = False
+        self._chapter_worker: Optional[NovelChapterWorker] = None
+        self._summary_worker: Optional[SummaryWorker] = None
+
+        self._apply_styles()
+        self._build_ui()
+        self._build_menu()
+
+        # 启动时加载小说列表，若有则打开第一本
+        novels = list_novels()
+        if novels:
+            self._open_novel(novels[0].id)
+        else:
+            self._show_create_novel_prompt()
+
+    def _apply_styles(self) -> None:
         self.setStyleSheet("""
-            QMainWindow {
-                background-color: #f5f7fa;
-            }
+            QMainWindow { background-color: #f5f7fa; }
             QGroupBox {
                 background-color: white;
                 border: 1px solid #e4e7eb;
                 border-radius: 8px;
-                padding: 4px;
-                margin-top: 0px;
+                padding: 12px;
             }
-            QLabel {
-                color: #1f2937;
-            }
-            QLineEdit {
-                border: 1px solid #d1d5db;
-                border-radius: 6px;
-                padding: 8px 12px;
-                background-color: white;
-                color: #111827;
-                font-size: 13px;
-                selection-background-color: #e0e7ff;
-                selection-color: #1f2937;
-            }
-            QLineEdit:hover {
-                border-color: #9ca3af;
-            }
-            QLineEdit:focus {
-                border: 1px solid #6366f1;
-            }
-            QComboBox {
-                border: 1px solid #d1d5db;
-                border-radius: 6px;
-                padding: 8px 12px;
-                padding-right: 30px;
-                background-color: white;
-                color: #111827;
-                font-size: 13px;
-                selection-background-color: #e0e7ff;
-                selection-color: #1f2937;
-            }
-            QComboBox:hover {
-                border-color: #9ca3af;
-            }
-            QComboBox:focus {
-                border: 1px solid #6366f1;
-            }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 25px;
-                border: none;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                border-left: 5px solid transparent;
-                border-right: 5px solid transparent;
-                border-top: 6px solid #6b7280;
-                width: 0px;
-                height: 0px;
-                margin-right: 8px;
-            }
-            QComboBox::down-arrow:hover {
-                border-top-color: #6366f1;
-            }
-            QComboBox QAbstractItemView {
-                border: 1px solid #c7d2fe;
-                border-radius: 6px;
-                background-color: #eef2ff;
-                color: #111827;
-                outline: none;
-                padding: 0px;
-                selection-background-color: #6366f1;
-                selection-color: white;
-            }
-            QComboBox QAbstractItemView::item {
-                padding: 8px 12px;
-                border-radius: 0px;
-                margin: 0px;
-                min-height: 22px;
-                background-color: #eef2ff;
-                color: #111827;
-            }
-            QComboBox QAbstractItemView::item:hover {
-                background-color: #c7d2fe;
-                color: #111827;
-            }
-            QComboBox QAbstractItemView::item:selected {
-                background-color: #6366f1;
-                color: white;
-            }
-            QScrollBar:vertical {
-                border: none;
-                background-color: #f9fafb;
-                width: 8px;
-                border-radius: 4px;
-                margin: 0px;
-            }
-            QScrollBar::handle:vertical {
-                background-color: #d1d5db;
-                border-radius: 4px;
-                min-height: 20px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background-color: #9ca3af;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-                background: none;
-            }
-            QPlainTextEdit {
+            QLineEdit, QPlainTextEdit {
                 border: 1px solid #d1d5db;
                 border-radius: 6px;
                 padding: 8px;
                 background-color: white;
-                color: #111827;
                 font-size: 13px;
-                selection-background-color: #e0e7ff;
-                selection-color: #1f2937;
             }
-            QPlainTextEdit:hover {
-                border-color: #9ca3af;
-            }
-            QPlainTextEdit:focus {
-                border: 1px solid #6366f1;
-            }
+            QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid #6366f1; }
             QPushButton {
                 border: 1px solid #d1d5db;
                 border-radius: 6px;
@@ -380,797 +264,327 @@ class MainWindow(QMainWindow):
                 font-size: 13px;
                 color: #374151;
             }
-            QPushButton:hover {
-                background-color: #f3f4f6;
-                border-color: #6366f1;
-                color: #1f2937;
+            QPushButton:hover { background-color: #f3f4f6; border-color: #6366f1; }
+            QPushButton:pressed { background-color: #e5e7eb; }
+            QListWidget {
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+                background-color: white;
+                padding: 4px;
             }
-            QPushButton:pressed {
-                background-color: #e5e7eb;
-            }
-            QPushButton:disabled {
-                background-color: #f9fafb;
-                color: #d1d5db;
-                border-color: #e5e7eb;
-            }
+            QListWidget::item { padding: 8px; }
+            QListWidget::item:selected { background-color: #e0e7ff; color: #4338ca; }
         """)
 
-        # 本地配置持久化（豆包 / 公众号账号信息）
-        self._settings = QSettings("OpenClaw", "WeChatWriter")
+    def _build_ui(self) -> None:
+        central = QWidget(self)
+        self.setCentralWidget(central)
+        main = QHBoxLayout(central)
+        main.setContentsMargins(12, 12, 12, 12)
+        main.setSpacing(12)
 
-        self._worker: Optional[GenerateWorker] = None
-        self._last_topic: str = ""
+        # ── 左侧 ─────────────────────────────────────
+        left = QVBoxLayout()
+        left.setSpacing(12)
 
-        self._build_ui()
-        self._build_menu()
+        # 小说选择
+        novel_row = QHBoxLayout()
+        novel_row.addWidget(QLabel("小说："))
+        self.novel_combo = QComboBox()
+        self.novel_combo.setMinimumWidth(180)
+        self.novel_combo.currentIndexChanged.connect(self._on_novel_selected)
+        novel_row.addWidget(self.novel_combo)
+        self.new_novel_btn = QPushButton("新建")
+        self.new_novel_btn.clicked.connect(self._show_create_novel_prompt)
+        novel_row.addWidget(self.new_novel_btn)
+        left.addLayout(novel_row)
 
-    def _save_account_settings(self) -> None:
-        """将豆包 / 公众号账号配置保存到本地。"""
+        # 小说配置
+        self.config_box = CollapsibleBox("小说配置")
+        self.config_box.add_widget(QLabel("标题"))
+        self.title_edit = QLineEdit()
+        self.title_edit.setPlaceholderText("小说标题")
+        self.config_box.add_widget(self.title_edit)
+        self.config_box.add_widget(QLabel("类型"))
+        self.genre_combo = QComboBox()
+        self.genre_combo.addItem("短篇", "short")
+        self.genre_combo.addItem("长篇", "long")
+        self.config_box.add_widget(self.genre_combo)
+        self.config_box.add_widget(QLabel("简介"))
+        self.synopsis_edit = QPlainTextEdit()
+        self.synopsis_edit.setPlaceholderText("故事简介、世界观等，人物由 AI 自动生成")
+        self.synopsis_edit.setFixedHeight(80)
+        self.config_box.add_widget(self.synopsis_edit)
+
+        # 豆包配置
+        ark_box = CollapsibleBox("模型配置")
+        self.ark_api_key_edit = QLineEdit()
+        self.ark_api_key_edit.setEchoMode(QLineEdit.Password)
+        self.ark_api_key_edit.setPlaceholderText("豆包 Key")
+        self.ark_model_edit = QLineEdit()
+        self.ark_model_edit.setPlaceholderText("豆包模型 ID")
+        self.enable_web_search_checkbox = QCheckBox("🌐 联网生成")
+        self.enable_web_search_checkbox.setToolTip("开启后模型可联网搜索")
+        ark_box.add_widget(QLabel("豆包 Key"))
+        ark_box.add_widget(self.ark_api_key_edit)
+        ark_box.add_widget(QLabel("豆包模型"))
+        ark_box.add_widget(self.ark_model_edit)
+        ark_box.add_widget(self.enable_web_search_checkbox)
+
+        self.ark_api_key_edit.setText(self._settings.value("ark/api_key", os.getenv("ARK_API_KEY", "")))
+        self.ark_model_edit.setText(self._settings.value("ark/model", os.getenv("ARK_MODEL", "")))
+        self.enable_web_search_checkbox.setChecked(
+            str(self._settings.value("ark/enable_web_search", "0")).lower() in {"1", "true", "yes"}
+        )
+
+        left.addWidget(self.config_box)
+        left.addWidget(ark_box)
+
+        # 章节列表
+        left.addWidget(QLabel("章节"))
+        self.chapter_list = QListWidget()
+        self.chapter_list.setMinimumHeight(120)
+        self.chapter_list.currentRowChanged.connect(self._on_chapter_selected)
+        left.addWidget(self.chapter_list)
+
+        main.addLayout(left, 1)
+
+        # ── 右侧 ─────────────────────────────────────
+        right = QVBoxLayout()
+
+        # 本章梗概
+        right.addWidget(QLabel("本章梗概（可选）"))
+        self.chapter_hint_edit = QLineEdit()
+        self.chapter_hint_edit.setPlaceholderText("如：第三章 - 主角初遇反派")
+        right.addWidget(self.chapter_hint_edit)
+
+        # 生成按钮
+        self.generate_btn = QPushButton("✨ 生成下一章")
+        self.generate_btn.setMinimumHeight(40)
+        self.generate_btn.setStyleSheet(
+            "QPushButton {"
+            "  background-color: #667eea; color: white; font-weight: 600;"
+            "  padding: 10px 24px; border: none; border-radius: 8px; font-size: 15px;"
+            "}"
+            "QPushButton:hover { background-color: #5568d3; }"
+            "QPushButton:disabled { background-color: #e5e7eb; color: #9ca3af; }"
+        )
+        self.generate_btn.clicked.connect(self._on_generate_clicked)
+        right.addWidget(self.generate_btn)
+
+        # 正文
+        right.addWidget(QLabel("正文"))
+        self.content_edit = QPlainTextEdit()
+        self.content_edit.setPlaceholderText("选中章节可编辑，或生成新章节")
+        right.addWidget(self.content_edit)
+
+        main.addLayout(right, 2)
+
+        # 加载遮罩
+        self._loading_overlay = LoadingOverlay(central, "正在生成...")
+        self._loading_overlay.hide()
+
+    def _build_menu(self) -> None:
+        menu = self.menuBar().addMenu("文件")
+        save_action = QAction("导出为 Markdown...", self)
+        save_action.triggered.connect(self._export_markdown)
+        menu.addAction(save_action)
+
+    def _refresh_novel_combo(self) -> None:
+        self.novel_combo.clear()
+        for n in list_novels():
+            self.novel_combo.addItem(n.title, n.id)
+        if self._novel:
+            idx = self.novel_combo.findData(self._novel.id)
+            if idx >= 0:
+                self.novel_combo.setCurrentIndex(idx)
+
+    def _show_create_novel_prompt(self) -> None:
+        title, ok = QInputDialog.getText(self, "新建小说", "小说标题：")
+        if not ok or not title.strip():
+            return
+        novel = create_novel(title=title.strip())
+        self._refresh_novel_combo()
+        self._open_novel(novel.id)
+
+    def _open_novel(self, novel_id: str) -> None:
+        novel = load_novel(novel_id)
+        if not novel:
+            return
+        self._novel = novel
+        self._refresh_novel_combo()
+        self._load_novel_into_ui()
+        self._refresh_chapter_list()
+
+    def _on_novel_selected(self, index: int) -> None:
+        if index < 0:
+            return
+        novel_id = self.novel_combo.currentData()
+        if novel_id and (not self._novel or self._novel.id != novel_id):
+            self._open_novel(novel_id)
+
+    def _load_novel_into_ui(self) -> None:
+        if not self._novel:
+            return
+        self.title_edit.setText(self._novel.title)
+        idx = self.genre_combo.findData(self._novel.genre)
+        if idx >= 0:
+            self.genre_combo.setCurrentIndex(idx)
+        self.synopsis_edit.setPlainText(self._novel.synopsis)
+
+    def _save_novel_from_ui(self) -> None:
+        if not self._novel:
+            return
+        self._novel.title = self.title_edit.text().strip()
+        self._novel.genre = self.genre_combo.currentData() or "short"
+        self._novel.synopsis = self.synopsis_edit.toPlainText().strip()
+        save_novel(self._novel)
+
+    def _refresh_chapter_list(self) -> None:
+        self.chapter_list.blockSignals(True)
+        self.chapter_list.clear()
+        if self._novel:
+            for c in self._novel.chapters:
+                item = QListWidgetItem(f"第{c.order}章 {c.title or '(无标题)'}")
+                item.setData(Qt.ItemDataRole.UserRole, c.id)
+                self.chapter_list.addItem(item)
+        self.chapter_list.blockSignals(False)
+
+    def _on_chapter_selected(self, row: int) -> None:
+        if not self._novel:
+            return
+        # 保存当前编辑到上一章（切换章节时）
+        if not self._suppress_chapter_save and self._current_chapter_index >= 0 and self._current_chapter_index < len(self._novel.chapters):
+            self._novel.chapters[self._current_chapter_index].content = self.content_edit.toPlainText()
+            save_novel(self._novel)
+        self._suppress_chapter_save = False
+        if row < 0:
+            self._current_chapter_index = -1
+            self.content_edit.clear()
+            return
+        self._current_chapter_index = row
+        ch = self._novel.chapters[row]
+        self.content_edit.setPlainText(ch.content)
+
+    def _on_generate_clicked(self) -> None:
+        if not self._novel:
+            QMessageBox.warning(self, "提示", "请先新建或选择一本小说。")
+            return
+
+        ark_key = self.ark_api_key_edit.text().strip()
+        ark_model = self.ark_model_edit.text().strip()
+        if not ark_key or not ark_model:
+            QMessageBox.warning(self, "提示", "请填写豆包 Key 和模型 ID。")
+            return
+
+        self._save_novel_from_ui()
+        self._save_ark_settings()
+
+        config = OpenClawConfig(
+            api_key=ark_key,
+            base_url=os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").strip(),
+            model=ark_model,
+            enable_web_search=self.enable_web_search_checkbox.isChecked(),
+        )
+
+        chapter_hint = self.chapter_hint_edit.text().strip()
+        self.generate_btn.setEnabled(False)
+        self._loading_overlay.show_overlay("正在生成下一章...")
+
+        self._chapter_worker = NovelChapterWorker(
+            novel=self._novel,
+            chapter_hint=chapter_hint,
+            config=config,
+            parent=self,
+        )
+        self._chapter_worker.finished.connect(self._on_chapter_generated)
+        self._chapter_worker.failed.connect(self._on_chapter_failed)
+        self._chapter_worker.start()
+
+    def _on_chapter_generated(self, content: str) -> None:
+        self._loading_overlay.show_overlay("正在生成本章摘要...")
+        self._save_ark_settings()
+
+        config = OpenClawConfig(
+            api_key=self.ark_api_key_edit.text().strip(),
+            base_url=os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").strip(),
+            model=self.ark_model_edit.text().strip(),
+            enable_web_search=False,
+        )
+
+        order = len(self._novel.chapters) + 1
+        title = self.chapter_hint_edit.text().strip() or f"第{order}章"
+        ch = Chapter(
+            id=str(uuid.uuid4()),
+            order=order,
+            title=title,
+            content=content,
+            summary="",
+        )
+        self._novel.chapters.append(ch)
+        self.content_edit.setPlainText(content)
+        self.chapter_hint_edit.clear()
+        self._refresh_chapter_list()
+        self._suppress_chapter_save = True
+        self.chapter_list.setCurrentRow(len(self._novel.chapters) - 1)
+
+        # 异步生成摘要
+        self._summary_worker = SummaryWorker(content, config, parent=self)
+        self._summary_worker.finished.connect(lambda s: self._on_summary_done(ch, s))
+        self._summary_worker.failed.connect(self._on_summary_failed)
+        self._summary_worker.start()
+
+    def _on_summary_done(self, ch: Chapter, summary: str) -> None:
+        ch.summary = summary
+        save_novel(self._novel)
+        self._loading_overlay.hide_overlay()
+        self.generate_btn.setEnabled(True)
+
+    def _on_summary_failed(self, msg: str) -> None:
+        self._loading_overlay.hide_overlay()
+        self.generate_btn.setEnabled(True)
+        QMessageBox.warning(self, "摘要生成失败", f"本章摘要未自动生成：{msg}\n可手动编辑。")
+
+    def _on_chapter_failed(self, msg: str) -> None:
+        self._loading_overlay.hide_overlay()
+        self.generate_btn.setEnabled(True)
+        QMessageBox.critical(self, "生成失败", f"调用模型失败：\n{msg}")
+
+    def _save_ark_settings(self) -> None:
         self._settings.setValue("ark/api_key", self.ark_api_key_edit.text().strip())
         self._settings.setValue("ark/model", self.ark_model_edit.text().strip())
         self._settings.setValue(
             "ark/enable_web_search",
             "1" if self.enable_web_search_checkbox.isChecked() else "0",
         )
-        self._settings.setValue("wechat/appid", self.wechat_appid_edit.text().strip())
-        self._settings.setValue(
-            "wechat/appsecret", self.wechat_appsecret_edit.text().strip()
-        )
-        self._settings.setValue(
-            "wechat/thumb_media_id", self.wechat_thumb_media_id_edit.text().strip()
-        )
 
-    def _build_ui(self) -> None:
-        central = QWidget(self)
-        self.setCentralWidget(central)
-        self._central_widget = central
-
-        left_col = QVBoxLayout()
-        left_col.setContentsMargins(12, 12, 12, 12)
-        left_col.setSpacing(12)
-
-        # ── 账号配置折叠面板 ──────────────────────────
-        config_box = CollapsibleBox("账号配置")
-
-        def field_label(text: str) -> QLabel:
-            lbl = QLabel(text)
-            lbl.setStyleSheet(
-                "color: #6b7280; font-size: 12px; font-weight: 500;"
-                "background: transparent; border: none;"
-            )
-            return lbl
-
-        self.ark_api_key_edit = QLineEdit()
-        self.ark_api_key_edit.setEchoMode(QLineEdit.Password)
-        self.ark_api_key_edit.setPlaceholderText("请输入")
-        self.ark_model_edit = QLineEdit()
-        self.ark_model_edit.setPlaceholderText("请输入")
-        self.enable_web_search_checkbox = QCheckBox("🌐 联网生成")
-        self.enable_web_search_checkbox.setStyleSheet("QCheckBox { font-size: 16px; }")
-        self.enable_web_search_checkbox.setToolTip(
-            "开启后模型可联网搜索最新信息辅助写作\n需要在火山引擎控制台开通 web_search 能力"
-        )
-        # 选中时显示对勾，优化文字与图标间距
-        _check_svg = (
-            "data:image/svg+xml;base64,"
-            "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+"
-            "PHBhdGggZmlsbD0ibm9uZSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2Ut"
-            "bGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGQ9Ik0zIDhsMyAzIDctNyIv"
-            "Pjwvc3ZnPg=="
-        )
-        self.enable_web_search_checkbox.setStyleSheet(
-            "QCheckBox {"
-            "  color: #6b7280; font-size: 13px; font-weight: 500;"
-            "  background: transparent; border: none;"
-            "  spacing: 10px;"
-            "}"
-            "QCheckBox::indicator {"
-            "  width: 18px; height: 18px; border-radius: 4px;"
-            "  border: 1px solid #d1d5db;"
-            "  background-color: white;"
-            "}"
-            "QCheckBox::indicator:checked {"
-            "  background-color: #6366f1; border-color: #6366f1;"
-            f"  image: url({_check_svg});"
-            "}"
-        )
-        self.wechat_appid_edit = QLineEdit()
-        self.wechat_appid_edit.setPlaceholderText("请输入")
-        self.wechat_appsecret_edit = QLineEdit()
-        self.wechat_appsecret_edit.setEchoMode(QLineEdit.Password)
-        self.wechat_appsecret_edit.setPlaceholderText("请输入")
-        self.wechat_thumb_media_id_edit = QLineEdit()
-        self.wechat_thumb_media_id_edit.setPlaceholderText("封面图 ID")
-
-        # 优先读取本地配置，其次回退到环境变量
-        self.ark_api_key_edit.setText(
-            self._settings.value("ark/api_key", os.getenv("ARK_API_KEY", ""))
-        )
-        self.ark_model_edit.setText(
-            self._settings.value("ark/model", os.getenv("ARK_MODEL", ""))
-        )
-        self.wechat_appid_edit.setText(
-            self._settings.value("wechat/appid", os.getenv("WECHAT_APPID", ""))
-        )
-        self.wechat_appsecret_edit.setText(
-            self._settings.value("wechat/appsecret", os.getenv("WECHAT_APPSECRET", ""))
-        )
-        self.wechat_thumb_media_id_edit.setText(
-            self._settings.value(
-                "wechat/thumb_media_id", os.getenv("WECHAT_THUMB_MEDIA_ID", "")
-            )
-        )
-        # 联网开关：本地优先，其次回退到环境变量 ARK_ENABLE_WEB_SEARCH
-        enable_web_search_default = os.getenv("ARK_ENABLE_WEB_SEARCH", "0").strip()
-        enable_web_search_flag = enable_web_search_default.lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        enable_web_search_value = self._settings.value(
-            "ark/enable_web_search", "1" if enable_web_search_flag else "0"
-        )
-        self.enable_web_search_checkbox.setChecked(
-            str(enable_web_search_value).lower() in {"1", "true", "yes", "on"}
-        )
-
-        self.upload_thumb_button = QPushButton("📁 上传图片")
-        self.upload_thumb_button.setToolTip(
-            "PNG → type=thumb（≤64KB）\nJPG → type=image（≤10MB）\n上传后自动填入 thumb_media_id"
-        )
-        self.upload_thumb_button.setStyleSheet(
-            "QPushButton {"
-            "  background-color: #f0f9ff; color: #0369a1;"
-            "  border: 1px solid #bae6fd; border-radius: 6px;"
-            "  padding: 6px 14px; font-size: 13px;"
-            "}"
-            "QPushButton:hover { background-color: #e0f2fe; border-color: #7dd3fc; }"
-            "QPushButton:pressed { background-color: #bae6fd; }"
-        )
-        self.upload_thumb_button.clicked.connect(self._on_upload_thumb_clicked)
-
-        thumb_hint = QLabel("支持 PNG/JPG，自动识别格式")
-        thumb_hint.setStyleSheet(
-            "color: #9ca3af; font-size: 11px; background: transparent; border: none;"
-        )
-
-        for lbl_text, widget in [
-            ("豆包 Key", self.ark_api_key_edit),
-            ("豆包模型", self.ark_model_edit),
-        ]:
-            config_box.add_widget(field_label(lbl_text))
-            config_box.add_widget(widget)
-        for lbl_text, widget in [
-            ("公众号 AppID", self.wechat_appid_edit),
-            ("公众号 Secret", self.wechat_appsecret_edit),
-        ]:
-            config_box.add_widget(field_label(lbl_text))
-            config_box.add_widget(widget)
-
-        config_box.add_widget(field_label("封面图 thumb_media_id"))
-        config_box.add_widget(self.upload_thumb_button)
-        config_box.add_widget(self.wechat_thumb_media_id_edit)
-        config_box.add_widget(thumb_hint)
-
-        # ── 文章折叠面板 ──────────────────────────────
-        article_box = CollapsibleBox("文章")
-
-        self.topic_edit = QLineEdit()
-        self.topic_edit.setPlaceholderText("必填")
-
-        self.audience_combo = QComboBox()
-        self.audience_combo.addItem("微信用户", "经常使用微信的普通用户")
-        self.audience_combo.addItem("不指定", "")
-        self.audience_combo.addItem("职场新人", "职场新人")
-        self.audience_combo.addItem("互联网打工人", "互联网打工人")
-        self.audience_combo.addItem("大学生", "大学生")
-        self.audience_combo.addItem("普通宝妈", "宝妈/宝爸等家庭用户")
-        self.audience_combo.addItem("小白用户", "几乎零基础的小白用户")
-        self.audience_combo.addItem("中小企业老板", "中小企业老板或个体经营者")
-
-        self.style_combo = QComboBox()
-        self.style_combo.addItem("不指定", "")
-        self.style_combo.addItem("科普聊天", "通俗易懂、像跟朋友聊天一样的科普风格。")
-        self.style_combo.addItem("职场干货", "结构清晰、观点明确、偏职场实战干货。")
-        self.style_combo.addItem("故事分享", "通过个人故事或案例来讲道理，轻松、有画面感。")
-        self.style_combo.addItem("运营拆解", "以拆解案例为主，有步骤、有数据、有总结。")
-
-        self.length_combo = QComboBox()
-        self.length_combo.addItem("中等", "medium")
-        self.length_combo.addItem("偏短", "short")
-        self.length_combo.addItem("偏长", "long")
-
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItem("标准干货", "standard")
-        self.mode_combo.addItem("故事化", "story")
-        self.mode_combo.addItem("案例拆解", "case_study")
-        self.mode_combo.addItem("清单文", "listicle")
-        self.mode_combo.addItem("深度分析", "analysis")
-
-        # 给所有下拉框的弹出视图加投影 + 背景色，产生层次感
-        def _apply_combo_popup_style(combo: QComboBox) -> None:
-            shadow = QGraphicsDropShadowEffect()
-            shadow.setBlurRadius(18)
-            shadow.setOffset(0, 4)
-            shadow.setColor(QColor(0, 0, 0, 70))
-            combo.view().setGraphicsEffect(shadow)
-            # viewport 是实际可见区域，必须单独设置背景色
-            combo.view().viewport().setStyleSheet(
-                "background-color: #eef2ff;"
-            )
-
-        for _combo in (
-            self.audience_combo, self.style_combo,
-            self.length_combo, self.mode_combo,
-        ):
-            _apply_combo_popup_style(_combo)
-
-        self.generate_button = QPushButton("✨ 生成文章")
-        self.generate_button.setMinimumHeight(40)
-        self.generate_button.setMinimumWidth(120)
-        self.generate_button.setStyleSheet(
-            "QPushButton {"
-            "  background-color: #667eea; color: #ffffff;"
-            "  font-weight: 600; padding: 10px 28px;"
-            "  border: none; border-radius: 8px; font-size: 15px;"
-            "}"
-            "QPushButton:hover { background-color: #5568d3; }"
-            "QPushButton:pressed { background-color: #4c5bc7; }"
-            "QPushButton:disabled { background-color: #e5e7eb; color: #9ca3af; }"
-        )
-        self.generate_button.clicked.connect(self._on_generate_clicked)
-
-        # 用 Grid 布局排列标签和控件（标签靠左，控件拉伸）
-        article_grid_widget = QWidget()
-        article_grid_widget.setStyleSheet("background: transparent; border: none;")
-        article_grid = QGridLayout(article_grid_widget)
-        article_grid.setContentsMargins(0, 0, 0, 0)
-        article_grid.setColumnStretch(1, 1)
-        article_grid.setVerticalSpacing(8)
-        article_grid.setHorizontalSpacing(10)
-
-        for row, (lbl_text, widget) in enumerate([
-            ("主题", self.topic_edit),
-            ("读者", self.audience_combo),
-            ("风格", self.style_combo),
-            ("长度", self.length_combo),
-            ("模式", self.mode_combo),
-        ]):
-            lbl = QLabel(lbl_text)
-            lbl.setStyleSheet(
-                "color: #6b7280; font-size: 13px; font-weight: 500;"
-                "background: transparent; border: none;"
-            )
-            article_grid.addWidget(lbl, row, 0)
-            article_grid.addWidget(widget, row, 1)
-
-        # 联网开关放在最后一行，跨两列
-        next_row = len([("主题",), ("读者",), ("风格",), ("长度",), ("模式",)])
-        article_grid.addWidget(self.enable_web_search_checkbox, next_row, 0, 1, 2)
-
-        article_box.add_widget(article_grid_widget)
-
-        # 左侧整体顺序：先账号配置，再文章
-        left_col.addWidget(config_box)
-        left_col.addWidget(article_box)
-
-
-        # 提示词编辑区（系统提示词）
-        prompt_label = QLabel("💡 系统提示词")
-        prompt_label.setStyleSheet("font-size: 13px; color: #6b7280; font-weight: 500;")
-        self.prompt_edit = QPlainTextEdit()
-        self.prompt_edit.setPlaceholderText("可选：自定义写作风格与规则，留空则使用默认提示词")
-        self.prompt_edit.setPlainText(build_article_system_prompt())
-        self.prompt_edit.setFixedHeight(140)
-        self.prompt_edit.setStyleSheet(
-            "QPlainTextEdit {"
-            "  border: 1px solid #d1d5db;"
-            "  border-radius: 6px;"
-            "  background-color: #f9fafb;"
-            "  color: #111827;"
-            "  font-size: 12px;"
-            "  padding: 10px;"
-            "  line-height: 1.5;"
-            "}"
-        )
-
-        # ---------- 右侧结果 ----------
-        result_group = QGroupBox()
-        result_group.setStyleSheet(
-            "QGroupBox {"
-            "  background-color: white;"
-            "  border: 1px solid #e4e7eb;"
-            "  border-radius: 8px;"
-            "  padding: 20px;"
-            "  margin-left: 0px;"
-            "}"
-        )
-        result_layout = QVBoxLayout(result_group)
-        result_layout.setSpacing(15)
-        result_layout.setContentsMargins(0, 0, 0, 0)
-
-        title_label = QLabel("生成结果")
-        title_label.setStyleSheet(
-            "font-weight: 600; font-size: 15px; color: #111827; margin-bottom: 8px;"
-        )
-
-        warn_label = QLabel(
-            "⚠️ 注意：不理解 Markdown 格式的不要在此页面修改，"
-            "发送到公众号后在草稿箱修改即可！"
-        )
-        warn_label.setStyleSheet(
-            "color: #dc2626; font-size: 12px; background-color: #fef2f2; "
-            "padding: 8px 12px; border-radius: 6px; border: 1px solid #fecaca;"
-        )
-
-        self.result_edit = QPlainTextEdit()
-        self.result_edit.setPlaceholderText("生成后的 Markdown 显示在此。")
-        self.result_edit.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.result_edit.setStyleSheet(
-            "QPlainTextEdit {"
-            "  border: 1px solid #d1d5db;"
-            "  border-radius: 6px;"
-            "  background-color: #fafbfc;"
-            "  color: #111827;"
-            "  font-family: 'SF Mono', Consolas, Menlo, monospace;"
-            "  font-size: 13px;"
-            "  line-height: 1.6;"
-            "  padding: 12px;"
-            "}"
-        )
-
-        buttons_bar = QHBoxLayout()
-        self.copy_button = QPushButton("📋 复制")
-        self.copy_button.setStyleSheet(
-            "QPushButton {"
-            "  background-color: white;"
-            "  color: #374151;"
-            "  border: 1px solid #d1d5db;"
-            "  border-radius: 6px;"
-            "  padding: 3px 12px;"
-            "  font-size: 13px;"
-            "}"
-            "QPushButton:hover {"
-            "  background-color: #f3f4f6;"
-            "  border-color: #6366f1;"
-            "}"
-            "QPushButton:pressed {"
-            "  background-color: #e5e7eb;"
-            "}"
-        )
-        self.copy_button.clicked.connect(self._copy_result_to_clipboard)
-        
-        self.clear_button = QPushButton("🗑️ 清空")
-        self.clear_button.setStyleSheet(
-            "QPushButton {"
-            "  background-color: white;"
-            "  color: #dc2626;"
-            "  border: 1px solid #fecaca;"
-            "  border-radius: 6px;"
-            "  padding: 3px 12px;"
-            "  font-size: 13px;"
-            "}"
-            "QPushButton:hover {"
-            "  background-color: #fef2f2;"
-            "  border-color: #dc2626;"
-            "}"
-            "QPushButton:pressed {"
-            "  background-color: #fee2e2;"
-            "}"
-        )
-        self.clear_button.clicked.connect(self._clear_result)
-        self.send_wechat_button = QPushButton("📤 发到公众号草稿")
-        self.send_wechat_button.setStyleSheet(
-            "QPushButton {"
-            "  background-color: #10b981;"
-            "  color: white;"
-            "  border: none;"
-            "  border-radius: 6px;"
-            "  padding: 3px 12px;"
-            "  font-size: 13px;"
-            "  font-weight: 500;"
-            "}"
-            "QPushButton:hover {"
-            "  background-color: #059669;"
-            "}"
-            "QPushButton:pressed {"
-            "  background-color: #047857;"
-            "}"
-        )
-        self.send_wechat_button.clicked.connect(self._send_to_wechat_draft)
-        buttons_bar.addWidget(self.copy_button)
-        buttons_bar.addWidget(self.clear_button)
-        buttons_bar.addWidget(self.send_wechat_button)
-        buttons_bar.addStretch(1)
-
-        self.reset_prompt_button = QPushButton("🔄 重置")
-        self.reset_prompt_button.setToolTip("恢复为默认系统提示词")
-        self.reset_prompt_button.setStyleSheet(
-            "QPushButton {"
-            "  background-color: #f3f4f6;"
-            "  color: #374151;"
-            "  border: 1px solid #d1d5db;"
-            "  border-radius: 6px;"
-            "  padding: 6px 14px;"
-            "  font-size: 13px;"
-            "}"
-            "QPushButton:hover {"
-            "  background-color: #e5e7eb;"
-            "  border-color: #9ca3af;"
-            "}"
-            "QPushButton:pressed {"
-            "  background-color: #d1d5db;"
-            "}"
-        )
-        self.reset_prompt_button.clicked.connect(self._on_reset_prompt_clicked)
-
-        # 顶部操作栏：提示词标签 + 按钮组
-        top_bar = QHBoxLayout()
-        top_bar.setSpacing(12)
-        top_bar.addWidget(prompt_label)
-        top_bar.addStretch(1)
-        top_bar.addWidget(self.reset_prompt_button)
-        top_bar.addWidget(self.generate_button)
-        
-        result_layout.addLayout(top_bar)
-        result_layout.addWidget(self.prompt_edit)
-        result_layout.addWidget(title_label)
-        result_layout.addWidget(warn_label)
-        result_layout.addWidget(self.result_edit)
-        result_layout.addLayout(buttons_bar)
-
-        # 主区域：左侧 + 右侧（顶部对齐）
-        main_v = QVBoxLayout(central)
-        main_v.setContentsMargins(0, 0, 0, 0)
-        top_widget = QWidget()
-        top_layout = QHBoxLayout(top_widget)
-        top_layout.setContentsMargins(6, 4, 12, 6)
-        top_layout.setSpacing(12)
-
-        left_widget = QWidget()
-        left_widget.setContentsMargins(0, 0, 0, 0)
-        left_widget.setLayout(left_col)
-
-        left_scroll = QScrollArea()
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setFixedWidth(280)
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        left_scroll.setStyleSheet(
-            "QScrollArea { border: none; background: transparent; }"
-            "QScrollArea > QWidget > QWidget { background: transparent; }"
-        )
-        left_scroll.setWidget(left_widget)
-
-        top_layout.addWidget(left_scroll, 0)
-        top_layout.addWidget(result_group, 1)
-        main_v.addWidget(top_widget, 1)
-
-        # 水印：整窗底部，左右居中
-        watermark = QLabel("✨ 关注微信公众号「不贴心小助手」，获取更多内容！")
-        watermark.setStyleSheet(
-            "color: #6366f1; font-size: 13px; font-weight: 500; "
-            "padding: 2px 0; background-color: transparent;"
-        )
-        watermark.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        main_v.addWidget(watermark, 0, Qt.AlignmentFlag.AlignHCenter)
-
-        # 加载遮罩（生成文章时显示）
-        self._loading_overlay = LoadingOverlay(central, "正在生成文章...")
-        central.installEventFilter(self)
-
-    def eventFilter(self, obj: QWidget, event: QEvent) -> bool:
-        if obj is self._central_widget and event.type() == QEvent.Type.Resize:
-            self._loading_overlay.setGeometry(self._central_widget.rect())
-        return super().eventFilter(obj, event)
-
-    def _build_menu(self) -> None:
-        menubar = self.menuBar()
-
-        file_menu = menubar.addMenu("文件")
-        save_action = QAction("保存为 Markdown...", self)
-        save_action.triggered.connect(self._save_as_markdown)
-        file_menu.addAction(save_action)
-
-        help_menu = menubar.addMenu("帮助")
-        about_action = QAction("关于 OpenClaw", self)
-        about_action.triggered.connect(self._show_about)
-        help_menu.addAction(about_action)
-
-    def _on_reset_prompt_clicked(self) -> None:
-        """恢复为默认系统提示词。"""
-        self.prompt_edit.setPlainText(build_article_system_prompt())
-
-    def _on_generate_clicked(self) -> None:
-        topic = self.topic_edit.text().strip()
-        if not topic:
-            QMessageBox.warning(self, "提示", "请先填写文章主题。")
+    def _export_markdown(self) -> None:
+        if not self._novel:
+            QMessageBox.warning(self, "提示", "请先选择一本小说。")
             return
-
-        audience = self.audience_combo.currentData() or None
-        style = self.style_combo.currentData() or None
-        length_value = self.length_combo.currentData()
-        length: ArticleLength = length_value  # type: ignore[assignment]
-        mode_value = self.mode_combo.currentData()
-        mode: WritingMode = mode_value  # type: ignore[assignment]
-
-        if self._worker is not None and self._worker.isRunning():
-            QMessageBox.information(self, "提示", "正在生成中，请稍候……")
-            return
-
-        system_prompt = self.prompt_edit.toPlainText().strip() or None
-
-        # 保存当前账号配置，方便下次启动自动带出
-        self._save_account_settings()
-
-        self.generate_button.setEnabled(False)
-        self.generate_button.setText("生成中...")
-        self._loading_overlay.show_overlay("正在生成文章...")
-
-        # 记录最近一次生成使用的主题，后面作为公众号标题候选
-        self._last_topic = topic
-
-        # 若界面填写了豆包 Key 和模型，优先用界面配置（Base URL 固定用 .env 或默认）
-        ark_key = self.ark_api_key_edit.text().strip()
-        ark_model = self.ark_model_edit.text().strip()
-        config_override: Optional[OpenClawConfig] = None
-        if ark_key and ark_model:
-            base_url = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").strip()
-            config_override = OpenClawConfig(
-                api_key=ark_key,
-                base_url=base_url,
-                model=ark_model,
-                enable_web_search=self.enable_web_search_checkbox.isChecked(),
-            )
-
-        self._worker = GenerateWorker(
-            topic=topic,
-            audience=audience,
-            style=style,
-            length=length,
-            mode=mode,
-            system_prompt=system_prompt,
-            config_override=config_override,
-            parent=self,
-        )
-        self._worker.finished.connect(self._on_generate_finished)
-        self._worker.failed.connect(self._on_generate_failed)
-        self._worker.start()
-
-    def _on_generate_finished(self, content: str) -> None:
-        self._loading_overlay.hide_overlay()
-        self.generate_button.setEnabled(True)
-        self.generate_button.setText("生成文章")
-        self.result_edit.setPlainText(content)
-
-    def _on_generate_failed(self, message: str) -> None:
-        self._loading_overlay.hide_overlay()
-        self.generate_button.setEnabled(True)
-        self.generate_button.setText("生成文章")
-        QMessageBox.critical(self, "生成失败", f"调用大模型失败：\n{message}")
-
-    def _copy_result_to_clipboard(self) -> None:
-        text = self.result_edit.toPlainText()
-        if not text.strip():
-            QMessageBox.information(self, "提示", "当前没有可复制的内容。")
-            return
-        QApplication.clipboard().setText(text)
-        QMessageBox.information(self, "已复制", "全文已复制到剪贴板，可以直接粘贴到公众号后台。")
-
-    def _clear_result(self) -> None:
-        self.result_edit.clear()
-
-    def _on_upload_thumb_clicked(self) -> None:
-        """通过后端服务上传封面图，根据格式自动选 type，自动填入 thumb_media_id。"""
-        filename, _ = QFileDialog.getOpenFileName(
+        path, _ = QFileDialog.getSaveFileName(
             self,
-            "选择封面图（PNG ≤64KB / JPG ≤10MB）",
-            str(Path.home()),
-            "封面图 (*.jpg *.jpeg *.png)",
+            "导出为 Markdown",
+            f"{self._novel.title}.md",
+            "Markdown (*.md);;所有文件 (*)",
         )
-        if not filename:
+        if not path:
             return
-
-        # 根据扩展名判断上传类型（不再在客户端限制大小，交给微信接口自身校验）
-        suffix = Path(filename).suffix.lower()
-        if suffix == ".png":
-            media_type = "thumb"          # PNG → type=thumb
-            mime_type = "image/png"
-        elif suffix in (".jpg", ".jpeg"):
-            media_type = "image"          # JPG → type=image
-            mime_type = "image/jpeg"
-        else:
-            QMessageBox.warning(
-                self, "格式不支持",
-                f"仅支持 PNG（≤64KB）和 JPG（≤10MB）。\n当前文件：{Path(filename).name}",
-            )
-            return
-
-        # 更新本地保存的账号配置（便于下次自动填充）
-        self._save_account_settings()
-
-        self.upload_thumb_button.setEnabled(False)
-        self.upload_thumb_button.setText("上传中...")
-        self._loading_overlay.show_overlay("正在上传封面图")
-        error_msg: Optional[str] = None
-        thumb_id = ""
-        try:
-            with open(filename, "rb") as f:
-                file_bytes = f.read()
-
-            # 通过后端转发到微信接口
-            backend_base = os.getenv(
-                "BACKEND_BASE_URL", "http://49.235.172.63:8000/"
-            ).rstrip("/")
-            fname = Path(filename).name
-            files = {"file": (fname, file_bytes, mime_type)}
-
-            # 可选：将当前填写的 AppID/Secret 传给后端，未填写则由后端自己用环境变量
-            appid = self.wechat_appid_edit.text().strip()
-            appsecret = self.wechat_appsecret_edit.text().strip()
-            form_data: Dict[str, str] = {}
-            if appid and appsecret:
-                form_data["wechat_appid"] = appid
-                form_data["wechat_appsecret"] = appsecret
-
-            resp = requests.post(
-                f"{backend_base}/wechat/upload_thumb",
-                data=form_data,
-                files=files,
-                timeout=60,
-            )
-            if resp.status_code != 200:
-                error_msg = (
-                    f"后端返回错误状态码 {resp.status_code}：\n{resp.text}"
-                )
-                return
-
-            data = resp.json()
-            thumb_id = data.get("thumb_media_id", "")
-            if not thumb_id:
-                error_msg = f"后端未返回 thumb_media_id：\n{data}"
-                return
-
-            self.wechat_thumb_media_id_edit.setText(thumb_id)
-
-        except Exception as exc:  # noqa: BLE001
-            error_msg = f"上传时出错：\n{exc}"
-        finally:
-            # 先关闭 loading，再弹窗（避免 QMessageBox 阻塞动画）
-            self._loading_overlay.hide_overlay()
-            self.upload_thumb_button.setEnabled(True)
-            if error_msg:
-                self.upload_thumb_button.setText("📁 上传图片")
-                QMessageBox.critical(self, "上传失败", error_msg)
-            elif thumb_id:
-                # 无弹窗，按钮短暂显示成功状态
-                self.upload_thumb_button.setText("✅ 已填入")
-                QTimer.singleShot(2000, lambda: self.upload_thumb_button.setText("📁 上传图片"))
-
-    def _extract_title_from_markdown(self, text: str) -> str:
-        # 1. 优先使用用户在左侧填写的「主题」
-        if self._last_topic:
-            base = self._last_topic.strip()
-        else:
-            base = ""
-
-        # 2. 如果没有主题，再从 Markdown 中找第一个标题行
-        if not base:
-            for line in text.splitlines():
-                line = line.strip()
-                if line.startswith("#"):
-                    base = re.sub(r"^#+", "", line).strip()
-                    break
-
-        # 3. 还没有，就从全文提取前若干个字
-        if not base:
-            pure = re.sub(r"[\r\n#*`>-]", " ", text)
-            pure = re.sub(r"\s+", " ", pure).strip()
-            base = pure or "未命名文章"
-
-        # 4. 为了避免触发公众号标题长度限制，统一截断到 20 个字符以内
-        return base[:20]
-
-    def _send_to_wechat_draft(self) -> None:
-        text = self.result_edit.toPlainText().strip()
-        if not text:
-            QMessageBox.information(self, "提示", "当前没有可发送的内容。")
-            return
-
-        backend_base = os.getenv("BACKEND_BASE_URL", "http://49.235.172.63:8000/").rstrip("/")
-        title = self._extract_title_from_markdown(text)
-
-         # 从界面读取（可选）公众号配置，未填写则让后端使用默认 .env
-        wechat_appid = self.wechat_appid_edit.text().strip() or None
-        wechat_appsecret = self.wechat_appsecret_edit.text().strip() or None
-        wechat_thumb_media_id = self.wechat_thumb_media_id_edit.text().strip() or None
-
-        payload = {
-            "title": title,
-            "content_md": text,
-        }
-        if wechat_appid and wechat_appsecret:
-            payload["wechat_appid"] = wechat_appid
-            payload["wechat_appsecret"] = wechat_appsecret
-        if wechat_thumb_media_id:
-            payload["wechat_thumb_media_id"] = wechat_thumb_media_id
-
-        # 保存当前账号配置
-        self._save_account_settings()
-
-        self._loading_overlay.show_overlay("正在发送到公众号...")
-        try:
-            resp = requests.post(
-                f"{backend_base}/wechat/draft",
-                json=payload,
-                timeout=20,
-            )
-            if resp.status_code != 200:
-                QMessageBox.critical(
-                    self,
-                    "发送失败",
-                    f"后端返回错误状态码 {resp.status_code}：\n{resp.text}",
-                )
-                return
-            data = resp.json()
-            draft_id = data.get("media_id", "")
-            QMessageBox.information(
-                self,
-                "发送成功",
-                f"已创建公众号草稿。\nmedia_id: {draft_id}\n请到公众号后台草稿箱查看。",
-            )
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(
-                self,
-                "发送失败",
-                f"调用后端接口异常：\n{exc}\n\n"
-                "请确认已在终端启动后端服务：\n"
-                "uvicorn wechat_backend.app:app --reload",
-            )
-        finally:
-            self._loading_overlay.hide_overlay()
-
-    def _save_as_markdown(self) -> None:
-        text = self.result_edit.toPlainText().strip()
-        if not text:
-            QMessageBox.information(self, "提示", "当前没有可保存的内容。")
-            return
-
-        filename, _ = QFileDialog.getSaveFileName(
-            self,
-            "保存为 Markdown 文件",
-            str(Path.cwd() / "openclaw_article.md"),
-            "Markdown 文件 (*.md);;所有文件 (*)",
-        )
-        if not filename:
-            return
-
-        try:
-            Path(filename).write_text(text, encoding="utf-8")
-            QMessageBox.information(self, "保存成功", f"已保存到：\n{filename}")
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "保存失败", f"保存文件时出错：\n{exc}")
-
-    def _show_about(self) -> None:
-        QMessageBox.information(
-            self,
-            "关于 OpenClaw",
-            "OpenClaw - 自动生成公众号文章初稿的小工具。\n\n"
-            "适合作为写作前的「打底稿」，再由人类进行润色和改写。",
-        )
+        lines = [f"# {self._novel.title}\n"]
+        for ch in self._novel.chapters:
+            lines.append(f"\n## {ch.title or f'第{ch.order}章'}\n\n")
+            lines.append(ch.content)
+            lines.append("\n")
+        Path(path).write_text("".join(lines), encoding="utf-8")
+        QMessageBox.information(self, "导出成功", f"已导出到：{path}")
 
 
 def main() -> None:
-    app = QApplication(sys.argv)
-    app.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-
-    window = MainWindow()
-    window.show()
-
-    sys.exit(app.exec())
+    app = QApplication([])
+    win = MainWindow()
+    win.show()
+    app.exec()
 
 
 if __name__ == "__main__":
     main()
-
