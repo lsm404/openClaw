@@ -55,9 +55,8 @@ pyinstaller --noconfirm --windowed --name OpenClaw run_desktop.py
 #### 4. 分发和运行
 
 - 把 `dist\OpenClaw\` 整个文件夹压缩成 zip 发给用户，解压后双击 `OpenClaw.exe` 即可。
-- 客户端内置的后端默认地址为：
-  - `http://49.235.172.63:8000/`
-  - 如需修改，可在运行环境中设置 `BACKEND_BASE_URL` 环境变量覆盖。
+- 客户端默认后端地址为 **`http://127.0.0.1:8000/`**（授权与微信转发共用 `BACKEND_BASE_URL`）。
+  - 连线上服务器时设置环境变量 `BACKEND_BASE_URL=http://你的服务器:8000/`。
 
 ---
 
@@ -185,15 +184,12 @@ firewall-cmd --reload
 
 #### 8. 客户端配置
 
-- 客户端当前默认后端地址为：`http://49.235.172.63:8000/`。  
-- 如需指向其他服务器：
-  - 启动前设置环境变量 `BACKEND_BASE_URL`，例如：
+- 客户端默认本机后端：`http://127.0.0.1:8000/`（与授权、草稿、封面上传同一地址）。  
+- 指向线上时在 `.env` 或环境中设置：
 
 ```bash
-BACKEND_BASE_URL=http://你的服务器IP:8000
+BACKEND_BASE_URL=http://你的服务器IP:8000/
 ```
-
-或在以后增加的设置界面中调整。
 
 ---
 

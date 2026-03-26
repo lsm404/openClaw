@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -31,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from .collapsible_box import CollapsibleBox
+from .machine_id import get_machine_id, normalize_activation_code
 from .config import load_config, OpenClawConfig
 from .generator import ArticleGenerator, ArticleLength, WritingMode
 from .prompt_templates import build_article_system_prompt
@@ -194,6 +197,216 @@ class LoadingOverlay(QWidget):
     def _on_anim_done(self) -> None:
         if self._effect.opacity() < 0.05:
             self.hide()
+
+
+def _backend_base_url() -> str:
+    """OpenClaw 自建后端（授权 / 微信转发等）统一基址。默认本机，避免本地测试误连线上。"""
+    return os.getenv("BACKEND_BASE_URL", "http://127.0.0.1:8000/").rstrip("/")
+
+
+def _license_skipped() -> bool:
+    return os.getenv("OPENCLAW_SKIP_LICENSE", "").strip().lower() in ("1", "true", "yes")
+
+
+def activation_debug_log_file() -> Path:
+    """激活调试日志路径（无控制台时也可打开此文件查看）。Windows: %LOCALAPPDATA%\\OpenClaw\\activation.log"""
+    if sys.platform == "win32":
+        root = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+        d = root / "OpenClaw"
+    else:
+        d = Path.home() / ".openclaw"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "activation.log"
+
+
+def activation_debug_log_file_project() -> Path:
+    """项目根目录下的调试日志，便于在仓库里直接打开（openClaw/openclaw_activation_debug.log）。"""
+    root = Path(__file__).resolve().parent.parent
+    return root / "openclaw_activation_debug.log"
+
+
+def activation_debug_log_paths() -> list[Path]:
+    return [activation_debug_log_file(), activation_debug_log_file_project()]
+
+
+def _activation_client_log(msg: str) -> None:
+    """
+    激活调试：stderr + 两处文件（AppData 与项目根），避免「无控制台 / 写盘路径不可写」时完全没记录。
+    关闭：OPENCLAW_SILENT_ACTIVATION_LOG=1
+    """
+    if os.getenv("OPENCLAW_SILENT_ACTIVATION_LOG", "").strip().lower() in ("1", "true", "yes"):
+        return
+    line = f"[OpenClaw激活] {msg}"
+    stamp = f"{datetime.now().isoformat(timespec='seconds')} {line}\n"
+    try:
+        print(line, file=sys.stderr, flush=True)
+    except OSError:
+        pass
+    for path in activation_debug_log_paths():
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(stamp)
+        except OSError:
+            continue
+
+
+def _settings_str(settings: QSettings, key: str) -> str:
+    v = settings.value(key)
+    if v is None:
+        return ""
+    return str(v).strip()
+
+
+def verify_license_with_server(settings: QSettings) -> tuple[bool, str]:
+    """向服务端校验当前机器与已保存激活码；失败返回 (False, 原因)。"""
+    if _license_skipped():
+        return True, ""
+    code = _settings_str(settings, "license/activation_code")
+    if not code:
+        return False, "尚未激活"
+    mid_now = get_machine_id()
+    mid_saved = _settings_str(settings, "license/machine_id")
+    if mid_saved and mid_saved != mid_now:
+        return False, "本机硬件标识已变化，请使用新机器码联系管理员或重新激活。"
+    url = f"{_backend_base_url()}/license/activate"
+    _activation_client_log(
+        f"启动校验 POST {url} | BACKEND_BASE_URL={os.getenv('BACKEND_BASE_URL', '<未设置>')} | "
+        f"code_norm_len={len(code)} prefix={code[:12]}… | machine_prefix={mid_now[:16]}…"
+    )
+    try:
+        resp = requests.post(
+            url,
+            json={"activation_code": code, "machine_id": mid_now},
+            timeout=20,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _activation_client_log(f"请求异常: {exc!r}")
+        return False, f"无法连接授权服务器：{exc}"
+    _activation_client_log(f"响应 HTTP {resp.status_code} body[:400]={resp.text[:400]!r}")
+    if resp.status_code == 200:
+        data = resp.json()
+        if data.get("ok"):
+            settings.setValue("license/machine_id", mid_now)
+            return True, ""
+        return False, data.get("message") or resp.text
+    try:
+        err = resp.json().get("detail", resp.text)
+    except Exception:  # noqa: BLE001
+        err = resp.text
+    return False, str(err)
+
+
+class LicenseActivationDialog(QDialog):
+    """展示机器码、输入激活码并请求服务端绑定。"""
+
+    def __init__(self, settings: QSettings, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._settings = settings
+        self.setWindowTitle("OpenClaw — 激活")
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        _base = _backend_base_url()
+        url_lbl = QLabel(f"后端服务：{_base}/license/activate")
+        url_lbl.setStyleSheet("color: #6b7280; font-size: 11px;")
+        url_lbl.setWordWrap(True)
+        url_lbl.setToolTip(
+            "与草稿、封面上传共用环境变量 BACKEND_BASE_URL；未设置时默认本机 127.0.0.1:8000。"
+            "上线时在项目根 .env 中改为你的服务器地址即可。\n"
+            "点击「激活」时的调试日志（两处都会追加）：\n"
+            f"{activation_debug_log_file()}\n{activation_debug_log_file_project()}"
+        )
+        layout.addWidget(url_lbl)
+        layout.addWidget(QLabel("本机机器码（首次激活成功后将自动绑定当前设备）："))
+        mid_row = QHBoxLayout()
+        self._machine_edit = QLineEdit()
+        self._machine_edit.setReadOnly(True)
+        self._machine_edit.setText(get_machine_id())
+        mid_row.addWidget(self._machine_edit)
+        copy_btn = QPushButton("复制")
+        copy_btn.clicked.connect(self._copy_machine_id)
+        mid_row.addWidget(copy_btn)
+        layout.addLayout(mid_row)
+        tip_lbl = QLabel("请输入购买后获得的激活码。激活成功后，该激活码将与当前设备绑定。")
+        tip_lbl.setWordWrap(True)
+        tip_lbl.setStyleSheet("color: #6b7280; font-size: 12px;")
+        layout.addWidget(tip_lbl)
+        layout.addWidget(QLabel("激活码："))
+        self._code_edit = QLineEdit()
+        self._code_edit.setPlaceholderText("请输入购买后获得的激活码")
+        saved = _settings_str(settings, "license/activation_code")
+        if saved:
+            self._code_edit.setText(saved)
+        layout.addWidget(self._code_edit)
+        btn_row = QHBoxLayout()
+        activate_btn = QPushButton("激活")
+        activate_btn.clicked.connect(self._on_activate)
+        btn_row.addWidget(activate_btn)
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+    def _copy_machine_id(self) -> None:
+        QApplication.clipboard().setText(self._machine_edit.text())
+        QMessageBox.information(self, "已复制", "机器码已复制到剪贴板，可用于售后排查。")
+
+    def _on_activate(self) -> None:
+        raw = self._code_edit.text().strip()
+        # 一进方法就记日志（避免「未输入激活码提前 return」时误以为没调用）
+        _activation_client_log(
+            f"_on_activate 已触发 raw_len={len(raw)} "
+            f"os.environ BACKEND_BASE_URL={os.getenv('BACKEND_BASE_URL', '<未设置>')} "
+            f"实际请求基址={_backend_base_url()}"
+        )
+        code = normalize_activation_code(raw)
+        if not code:
+            QMessageBox.warning(self, "提示", "请输入购买后获得的激活码。")
+            return
+        mid = get_machine_id()
+        url = f"{_backend_base_url()}/license/activate"
+        _activation_client_log(
+            f"即将 POST {url} | code_norm_len={len(code)} prefix={code[:12]}… | machine_prefix={mid[:16]}…"
+        )
+        try:
+            resp = requests.post(
+                url,
+                json={"activation_code": raw, "machine_id": mid},
+                timeout=20,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _activation_client_log(f"请求异常: {exc!r}")
+            paths = "\n".join(str(p) for p in activation_debug_log_paths())
+            QMessageBox.critical(
+                self,
+                "激活失败",
+                f"本次请求地址：\n{url}\n\n网络错误：{exc}\n\n调试日志（若仍无文件说明运行的是旧版程序）：\n{paths}",
+            )
+            return
+        _activation_client_log(f"响应 HTTP {resp.status_code} body[:400]={resp.text[:400]!r}")
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("ok"):
+                self._settings.setValue("license/activation_code", code)
+                self._settings.setValue("license/machine_id", mid)
+                QMessageBox.information(
+                    self,
+                    "成功",
+                    data.get("message", "激活成功，当前设备已完成绑定。"),
+                )
+                self.accept()
+                return
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except Exception:  # noqa: BLE001
+            detail = resp.text
+        paths = "\n".join(str(p) for p in activation_debug_log_paths())
+        QMessageBox.critical(
+            self,
+            "激活失败",
+            f"本次请求地址：\n{url}\n\n服务端返回：\n{detail}\n\n调试日志：\n{paths}\n\n"
+            f"若地址不是 127.0.0.1，说明 BACKEND_BASE_URL 指向了远程；请检查系统环境变量与项目根 .env。",
+        )
 
 
 class GenerateWorker(QThread):
@@ -450,7 +663,7 @@ class MainWindow(QMainWindow):
         self.enable_web_search_checkbox.setToolTip(
             "开启后模型可联网搜索最新信息辅助写作\n需要在火山引擎控制台开通 web_search 能力"
         )
-        # 选中时显示对勾，优化文字与图标间距
+        # 选中时显示圆形+对勾，未选中为空心圆
         _check_svg = (
             "data:image/svg+xml;base64,"
             "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+"
@@ -462,15 +675,16 @@ class MainWindow(QMainWindow):
             "QCheckBox {"
             "  color: #6b7280; font-size: 13px; font-weight: 500;"
             "  background: transparent; border: none;"
-            "  spacing: 10px;"
+            "  spacing: 8px;"
             "}"
             "QCheckBox::indicator {"
-            "  width: 18px; height: 18px; border-radius: 4px;"
+            "  width: 12px; height: 12px; border-radius: 6px;"
             "  border: 1px solid #d1d5db;"
             "  background-color: white;"
             "}"
             "QCheckBox::indicator:checked {"
-            "  background-color: #6366f1; border-color: #6366f1;"
+            "  background-color: #22c55e; border-color: #22c55e;"
+            "  border-radius: 6px;"
             f"  image: url({_check_svg});"
             "}"
         )
@@ -874,6 +1088,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction(save_action)
 
         help_menu = menubar.addMenu("帮助")
+        lic_action = QAction("授权与机器码…", self)
+        lic_action.triggered.connect(self._show_license_dialog)
+        help_menu.addAction(lic_action)
         about_action = QAction("关于 OpenClaw", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
@@ -1000,9 +1217,7 @@ class MainWindow(QMainWindow):
                 file_bytes = f.read()
 
             # 通过后端转发到微信接口
-            backend_base = os.getenv(
-                "BACKEND_BASE_URL", "http://49.235.172.63:8000/"
-            ).rstrip("/")
+            backend_base = _backend_base_url()
             fname = Path(filename).name
             files = {"file": (fname, file_bytes, mime_type)}
 
@@ -1078,7 +1293,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "当前没有可发送的内容。")
             return
 
-        backend_base = os.getenv("BACKEND_BASE_URL", "http://49.235.172.63:8000/").rstrip("/")
+        backend_base = _backend_base_url()
         title = self._extract_title_from_markdown(text)
 
          # 从界面读取（可选）公众号配置，未填写则让后端使用默认 .env
@@ -1160,10 +1375,39 @@ class MainWindow(QMainWindow):
             "适合作为写作前的「打底稿」，再由人类进行润色和改写。",
         )
 
+    def _show_license_dialog(self) -> None:
+        dlg = LicenseActivationDialog(self._settings, self)
+        dlg.exec()
+
 
 def main() -> None:
+    # 再次以项目 .env 覆盖系统环境变量，避免 BACKEND_BASE_URL 仍指向旧线上地址
+    from pathlib import Path as _Path
+
+    from dotenv import load_dotenv as _load_dotenv
+
+    _load_dotenv(_Path(__file__).resolve().parent.parent / ".env", override=True)
+
     app = QApplication(sys.argv)
     app.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+
+    settings = QSettings("OpenClaw", "WeChatWriter")
+    if not _license_skipped():
+        ok, reason = verify_license_with_server(settings)
+        while not ok:
+            dlg = LicenseActivationDialog(settings)
+            if dlg.exec() != QDialog.Accepted:
+                QMessageBox.warning(
+                    None,
+                    "OpenClaw",
+                    "未完成激活，程序将退出。\n\n"
+                    f"原因：{reason}\n\n"
+                    "开发调试可设置环境变量 OPENCLAW_SKIP_LICENSE=1 跳过授权。",
+                )
+                sys.exit(1)
+            ok, reason = verify_license_with_server(settings)
+            if not ok:
+                QMessageBox.warning(None, "OpenClaw", f"授权仍无效：{reason}")
 
     window = MainWindow()
     window.show()
@@ -1173,4 +1417,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

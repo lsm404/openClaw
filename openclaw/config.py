@@ -1,10 +1,12 @@
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-
-load_dotenv()
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+# override=True：优先采用项目 .env，避免 Windows 已存在的用户/系统环境变量把 OPENCLAW_* 指向旧远程
+load_dotenv(_ENV_FILE, override=True)
 
 
 @dataclass

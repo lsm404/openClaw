@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import sys
 import time
 from typing import Any, Dict, Optional
 
@@ -8,11 +10,84 @@ import markdown
 import requests
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
+from starlette.requests import Request
 
 from .config import WechatConfig, load_wechat_config
+from .license_db import bind_or_verify, load_allowed_codes, normalize_code
+
+_LOG = logging.getLogger("openclaw")
+
+
+def _configure_openclaw_logging() -> None:
+    """独立 handler + 立即刷 stderr，避免 print 在部分终端下不显示。"""
+    _LOG.setLevel(logging.INFO)
+    if _LOG.handlers:
+        return
+    h = logging.StreamHandler(sys.stderr)
+    h.setLevel(logging.INFO)
+    h.setFormatter(logging.Formatter("%(levelname)s [openclaw] %(message)s"))
+    _LOG.addHandler(h)
+    _LOG.propagate = False
 
 
 app = FastAPI(title="OpenClaw WeChat Backend", version="0.1.0")
+_configure_openclaw_logging()
+
+
+@app.middleware("http")
+async def _openclaw_request_log_middleware(request: Request, call_next: Any) -> Any:
+    _LOG.info("%s %s", request.method, request.url.path)
+    return await call_next(request)
+
+
+@app.on_event("startup")
+def _log_license_pool_on_startup() -> None:
+    import os
+    from pathlib import Path
+
+    from .license_db import (
+        DOTENV_CWD,
+        DOTENV_LOCAL_CODES,
+        DOTENV_PROJECT_ROOT,
+        load_allowed_codes,
+    )
+
+    raw = os.getenv("OPENCLAW_LICENSE_CODES", "")
+    n = len(load_allowed_codes())
+    _LOG.info(
+        "OPENCLAW_LICENSE_CODES 读取自 os.environ（load_dotenv：先 cwd/.env 再 项目根/.env，后者优先覆盖；"
+        "若仍空则由 license_db 从项目根 .env / local_activation_codes.env / OPENCLAW_DOTENV_PATH 兜底解析）"
+    )
+    _LOG.info(
+        "  项目根 .env: %s 存在=%s",
+        DOTENV_PROJECT_ROOT,
+        DOTENV_PROJECT_ROOT.is_file(),
+    )
+    _LOG.info(
+        "  local_activation_codes.env: %s 存在=%s",
+        DOTENV_LOCAL_CODES,
+        DOTENV_LOCAL_CODES.is_file(),
+    )
+    _LOG.info(
+        "  当前工作目录 .env: %s 存在=%s (cwd=%s)",
+        DOTENV_CWD,
+        DOTENV_CWD.is_file(),
+        Path.cwd(),
+    )
+    _LOG.info(
+        "  变量已设置长度(字符): %s → 解析后激活码条数: %s",
+        len(raw.strip()),
+        n,
+    )
+    if n == 0:
+        _LOG.warning(
+            "未配置 OPENCLAW_LICENSE_CODES。请在环境变量或项目根 .env 中设置逗号分隔的激活码。"
+        )
+
+
+class LicenseActivateRequest(BaseModel):
+    activation_code: str
+    machine_id: str
 
 
 class DraftRequest(BaseModel):
@@ -77,6 +152,39 @@ token_cache = TokenCache()
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/license/pool-size")
+def license_pool_size() -> dict[str, int]:
+    """本地自检：当前进程合并后的激活码池条目数（不含已绑定逻辑）。"""
+    from .license_db import load_allowed_codes
+
+    return {"n": len(load_allowed_codes())}
+
+
+@app.post("/license/activate")
+def license_activate(req: LicenseActivateRequest) -> dict[str, Any]:
+    """
+    激活码首次使用会绑定 machine_id；同一机器重复调用返回成功；
+    已绑定其它机器则拒绝。
+    """
+    pool_n = len(load_allowed_codes())
+    code_n = normalize_code(req.activation_code)
+    mid = (req.machine_id or "").strip()
+    _LOG.info(
+        "POST /license/activate pool_size=%s code_norm=%s… len=%s machine_id=%s…",
+        pool_n,
+        code_n[:16],
+        len(code_n),
+        mid[:24],
+    )
+    ok, message = bind_or_verify(req.activation_code, req.machine_id)
+    _LOG.info("activate result ok=%s detail=%s", ok, message[:160])
+    if ok:
+        return {"ok": True, "message": message}
+    if "其它设备" in message:
+        raise HTTPException(status_code=403, detail=message)
+    raise HTTPException(status_code=400, detail=message)
 
 
 @app.post("/wechat/upload_thumb")

@@ -1,10 +1,12 @@
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-
-load_dotenv()
+# 始终从项目根目录（openClaw/）加载 .env，避免 uvicorn 工作目录不是项目根时读不到 OPENCLAW_LICENSE_CODES
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(_ENV_FILE, override=True)
 
 
 @dataclass

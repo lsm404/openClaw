@@ -39,6 +39,7 @@ dist/
 
 ### 项目配置 / 本地环境
 .env
+local_activation_codes.env
 
 ### 前端 / 其他常见目录（预防未来扩展）
 node_modules/
