@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 import requests
 from PySide6.QtCore import QEvent, QRectF, QSettings, QTimer, Qt, QThread, Signal
-from PySide6.QtGui import QAction, QColor, QPainter, QPen, QPainterPath
+from PySide6.QtGui import QAction, QColor, QFontMetrics, QPainter, QPen, QPainterPath
 from PySide6.QtWidgets import QGraphicsDropShadowEffect
 from PySide6.QtWidgets import (
     QApplication,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QInputDialog,
     QScrollArea,
     QWidget,
     QVBoxLayout,
@@ -33,7 +35,7 @@ from PySide6.QtWidgets import (
 from .collapsible_box import CollapsibleBox
 from .config import load_config, OpenClawConfig
 from .generator import ArticleGenerator, ArticleLength, WritingMode
-from .prompt_templates import build_article_system_prompt
+from .prompt_templates import build_article_system_prompt_presets
 
 
 class LoadingSpinner(QWidget):
@@ -107,6 +109,116 @@ class _DotLabel(QLabel):
     def _render(self) -> None:
         dots = "." * self._idx + "<span style='color:transparent'>." * (3 - self._idx) + "</span>"
         self.setText(f"<span>{self._base}</span>{dots}")
+
+
+class PromptSlotItem(QWidget):
+    activated = Signal(int)
+    rename_requested = Signal(int)
+
+    def __init__(self, index: int, text: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._index = index
+        self._full_text = text
+        self.setFixedSize(102, 32)
+
+        self._button = QPushButton(self)
+        self._button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._button.clicked.connect(lambda: self.activated.emit(self._index))
+
+        self._edit_button = QPushButton("✎", self._button)
+        self._edit_button.setFixedSize(18, 18)
+        self._edit_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._edit_button.setToolTip("编辑名称")
+        self._edit_button.clicked.connect(lambda: self.rename_requested.emit(self._index))
+
+        self.set_text(text)
+        self.set_active(False)
+
+    def set_text(self, text: str) -> None:
+        self._full_text = text
+        metrics = QFontMetrics(self._button.font())
+        elided = metrics.elidedText(text, Qt.TextElideMode.ElideRight, 62)
+        self._button.setText(elided)
+        self._button.setToolTip(text)
+
+    def set_active(self, active: bool) -> None:
+        if active:
+            self._button.setStyleSheet(
+                "QPushButton {"
+                "  background-color: #eef2ff;"
+                "  color: #4338ca;"
+                "  border: 1px solid #6366f1;"
+                "  border-radius: 6px;"
+                "  padding: 6px 24px 6px 8px;"
+                "  font-size: 12px;"
+                "  font-weight: 600;"
+                "  text-align: left;"
+                "}"
+            )
+        else:
+            self._button.setStyleSheet(
+                "QPushButton {"
+                "  background-color: #ffffff;"
+                "  color: #6b7280;"
+                "  border: 1px solid #d1d5db;"
+                "  border-radius: 6px;"
+                "  padding: 6px 24px 6px 8px;"
+                "  font-size: 12px;"
+                "  font-weight: 500;"
+                "  text-align: left;"
+                "}"
+                "QPushButton:hover {"
+                "  border-color: #a5b4fc;"
+                "  color: #4338ca;"
+                "}"
+            )
+
+        self._edit_button.setStyleSheet(
+            "QPushButton {"
+            "  background-color: transparent;"
+            "  color: #6b7280;"
+            "  border: none;"
+            "  border-radius: 4px;"
+            "  padding: 0px;"
+            "  font-size: 11px;"
+            "}"
+            "QPushButton:hover {"
+            "  background-color: rgba(99, 102, 241, 0.10);"
+            "  color: #4338ca;"
+            "}"
+        )
+
+    def resizeEvent(self, event) -> None:
+        self._button.setGeometry(0, 0, self.width(), self.height())
+        self._edit_button.move(self.width() - self._edit_button.width() - 8, 7)
+        super().resizeEvent(event)
+
+
+class ChevronComboBox(QComboBox):
+    """使用代码绘制下拉箭头，避免不同平台样式渲染异常。"""
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        color = QColor("#4338ca") if self.hasFocus() else QColor("#4b5563")
+        pen = QPen(color, 1.8, Qt.PenStyle.SolidLine)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+
+        center_x = self.width() - 18
+        center_y = self.height() / 2 + 0.5
+        half_width = 4.5
+        half_height = 2.5
+
+        path = QPainterPath()
+        path.moveTo(center_x - half_width, center_y - half_height)
+        path.lineTo(center_x, center_y + half_height)
+        path.lineTo(center_x + half_width, center_y - half_height)
+        painter.drawPath(path)
 
 
 class LoadingOverlay(QWidget):
@@ -241,9 +353,9 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("OpenClaw - 公众号写作助手")
-        
+
         # 设置固定窗口大小（不使用之前保存的大小）
-        self.setFixedSize(1100, 750)
+        self.setFixedSize(1260, 780)
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #f5f7fa;
@@ -294,20 +406,14 @@ class MainWindow(QMainWindow):
             QComboBox::drop-down {
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 25px;
+                width: 30px;
                 border: none;
             }
             QComboBox::down-arrow {
                 image: none;
-                border-left: 5px solid transparent;
-                border-right: 5px solid transparent;
-                border-top: 6px solid #6b7280;
                 width: 0px;
                 height: 0px;
-                margin-right: 8px;
-            }
-            QComboBox::down-arrow:hover {
-                border-top-color: #6366f1;
+                border: none;
             }
             QComboBox QAbstractItemView {
                 border: 1px solid #c7d2fe;
@@ -400,6 +506,15 @@ class MainWindow(QMainWindow):
 
         self._worker: Optional[GenerateWorker] = None
         self._last_topic: str = ""
+        self._wechat_accounts = self._load_wechat_accounts()
+        self._active_wechat_account_index = self._load_active_wechat_account_index()
+        self._prompt_slot_labels = ["提示词1", "提示词2", "提示词3", "提示词4"]
+        self._prompt_slot_names = self._load_prompt_slot_names()
+        self._prompt_slot_defaults = build_article_system_prompt_presets()
+        self._prompt_slot_values = self._load_prompt_slot_values()
+        self._active_prompt_slot = self._load_active_prompt_slot()
+        self._prompt_slot_items: list[PromptSlotItem] = []
+        self._is_switching_prompt_slot = False
 
         self._build_ui()
         self._build_menu()
@@ -412,13 +527,277 @@ class MainWindow(QMainWindow):
             "ark/enable_web_search",
             "1" if self.enable_web_search_checkbox.isChecked() else "0",
         )
-        self._settings.setValue("wechat/appid", self.wechat_appid_edit.text().strip())
+        self._update_current_wechat_account_from_inputs()
+        current_account = self._current_wechat_account()
+        self._settings.setValue("wechat/appid", current_account["appid"])
+        self._settings.setValue("wechat/appsecret", current_account["appsecret"])
+        self._settings.setValue("wechat/thumb_media_id", current_account["thumb_media_id"])
         self._settings.setValue(
-            "wechat/appsecret", self.wechat_appsecret_edit.text().strip()
+            "wechat/accounts_json",
+            json.dumps(self._wechat_accounts, ensure_ascii=False),
         )
         self._settings.setValue(
-            "wechat/thumb_media_id", self.wechat_thumb_media_id_edit.text().strip()
+            "wechat/active_account_index",
+            self._active_wechat_account_index,
         )
+        self._settings.sync()
+
+    def _default_wechat_account(self, name: str = "公众号1") -> dict[str, str]:
+        return {
+            "name": name,
+            "appid": "",
+            "appsecret": "",
+            "thumb_media_id": "",
+        }
+
+    def _coerce_wechat_account(
+        self,
+        raw: Any,
+        fallback_name: str,
+    ) -> dict[str, str]:
+        if not isinstance(raw, dict):
+            return self._default_wechat_account(fallback_name)
+        return {
+            "name": str(raw.get("name", fallback_name) or fallback_name).strip(),
+            "appid": str(raw.get("appid", "") or "").strip(),
+            "appsecret": str(raw.get("appsecret", "") or "").strip(),
+            "thumb_media_id": str(raw.get("thumb_media_id", "") or "").strip(),
+        }
+
+    def _load_wechat_accounts(self) -> list[dict[str, str]]:
+        raw_json = str(self._settings.value("wechat/accounts_json", "") or "").strip()
+        accounts: list[dict[str, str]] = []
+        if raw_json:
+            try:
+                parsed = json.loads(raw_json)
+            except json.JSONDecodeError:
+                parsed = []
+            if isinstance(parsed, list):
+                for index, raw in enumerate(parsed, start=1):
+                    accounts.append(
+                        self._coerce_wechat_account(raw, f"公众号{index}")
+                    )
+        if accounts:
+            return accounts
+
+        appid = str(self._settings.value("wechat/appid", os.getenv("WECHAT_APPID", "")) or "").strip()
+        appsecret = str(
+            self._settings.value("wechat/appsecret", os.getenv("WECHAT_APPSECRET", "")) or ""
+        ).strip()
+        thumb_media_id = str(
+            self._settings.value(
+                "wechat/thumb_media_id",
+                os.getenv("WECHAT_THUMB_MEDIA_ID", ""),
+            )
+            or ""
+        ).strip()
+        if appid or appsecret or thumb_media_id:
+            account = self._default_wechat_account("公众号1")
+            account["appid"] = appid
+            account["appsecret"] = appsecret
+            account["thumb_media_id"] = thumb_media_id
+            return [account]
+        return [self._default_wechat_account("公众号1")]
+
+    def _load_active_wechat_account_index(self) -> int:
+        raw_value = self._settings.value("wechat/active_account_index", 0)
+        try:
+            index = int(raw_value)
+        except (TypeError, ValueError):
+            index = 0
+        return max(0, min(index, len(self._wechat_accounts) - 1))
+
+    def _current_wechat_account(self) -> dict[str, str]:
+        return self._wechat_accounts[self._active_wechat_account_index]
+
+    def _update_current_wechat_account_from_inputs(self) -> None:
+        if not hasattr(self, "wechat_appid_edit"):
+            return
+        account = self._current_wechat_account()
+        account["appid"] = self.wechat_appid_edit.text().strip()
+        account["appsecret"] = self.wechat_appsecret_edit.text().strip()
+        account["thumb_media_id"] = self.wechat_thumb_media_id_edit.text().strip()
+
+    def _apply_current_wechat_account_to_inputs(self) -> None:
+        if not hasattr(self, "wechat_appid_edit"):
+            return
+        account = self._current_wechat_account()
+        self.wechat_appid_edit.setText(account["appid"])
+        self.wechat_appsecret_edit.setText(account["appsecret"])
+        self.wechat_thumb_media_id_edit.setText(account["thumb_media_id"])
+
+    def _refresh_wechat_account_combo(self) -> None:
+        if not hasattr(self, "wechat_account_combo"):
+            return
+        self.wechat_account_combo.blockSignals(True)
+        self.wechat_account_combo.clear()
+        for index, account in enumerate(self._wechat_accounts, start=1):
+            self.wechat_account_combo.addItem(
+                account["name"] or f"公众号{index}",
+                index - 1,
+            )
+        self.wechat_account_combo.setCurrentIndex(self._active_wechat_account_index)
+        self.wechat_account_combo.blockSignals(False)
+        if hasattr(self, "wechat_delete_account_button"):
+            self.wechat_delete_account_button.setEnabled(len(self._wechat_accounts) > 1)
+
+    def _switch_wechat_account(self, index: int) -> None:
+        if index < 0 or index >= len(self._wechat_accounts):
+            return
+        self._update_current_wechat_account_from_inputs()
+        self._active_wechat_account_index = index
+        self._apply_current_wechat_account_to_inputs()
+        self._refresh_wechat_account_combo()
+        self._save_account_settings()
+
+    def _add_wechat_account(self) -> None:
+        default_name = f"公众号{len(self._wechat_accounts) + 1}"
+        name, ok = QInputDialog.getText(
+            self,
+            "新增公众号账号",
+            "账号名称：",
+            text=default_name,
+        )
+        if not ok:
+            return
+        self._update_current_wechat_account_from_inputs()
+        self._wechat_accounts.append(
+            self._default_wechat_account(name.strip() or default_name)
+        )
+        self._active_wechat_account_index = len(self._wechat_accounts) - 1
+        self._apply_current_wechat_account_to_inputs()
+        self._refresh_wechat_account_combo()
+        self._save_account_settings()
+
+    def _rename_wechat_account(self) -> None:
+        account = self._current_wechat_account()
+        default_name = f"公众号{self._active_wechat_account_index + 1}"
+        name, ok = QInputDialog.getText(
+            self,
+            "编辑公众号账号",
+            "账号名称：",
+            text=account["name"] or default_name,
+        )
+        if not ok:
+            return
+        account["name"] = name.strip() or default_name
+        self._refresh_wechat_account_combo()
+        self._save_account_settings()
+
+    def _delete_wechat_account(self) -> None:
+        if len(self._wechat_accounts) <= 1:
+            QMessageBox.information(self, "提示", "至少保留一个公众号账号。")
+            return
+        account_name = self._current_wechat_account()["name"] or "当前账号"
+        reply = QMessageBox.question(
+            self,
+            "删除公众号账号",
+            f"确认删除“{account_name}”吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._update_current_wechat_account_from_inputs()
+        self._wechat_accounts.pop(self._active_wechat_account_index)
+        self._active_wechat_account_index = min(
+            self._active_wechat_account_index,
+            len(self._wechat_accounts) - 1,
+        )
+        self._apply_current_wechat_account_to_inputs()
+        self._refresh_wechat_account_combo()
+        self._save_account_settings()
+
+    def _load_prompt_slot_values(self) -> list[str]:
+        values: list[str] = []
+        for index, default_prompt in enumerate(self._prompt_slot_defaults):
+            value = self._settings.value(f"prompts/slot_{index}", default_prompt)
+            values.append(str(value) if value is not None else default_prompt)
+        return values
+
+    def _load_prompt_slot_names(self) -> list[str]:
+        names: list[str] = []
+        for index, default_name in enumerate(self._prompt_slot_labels):
+            value = self._settings.value(f"prompts/name_{index}", default_name)
+            text = str(value).strip() if value is not None else default_name
+            names.append(text or default_name)
+        return names
+
+    def _load_active_prompt_slot(self) -> int:
+        raw_value = self._settings.value("prompts/active_slot", 0)
+        try:
+            index = int(raw_value)
+        except (TypeError, ValueError):
+            index = 0
+        return max(0, min(index, len(self._prompt_slot_labels) - 1))
+
+    def _save_current_prompt_slot(self) -> None:
+        if not hasattr(self, "prompt_edit"):
+            return
+        current_text = self.prompt_edit.toPlainText()
+        self._prompt_slot_values[self._active_prompt_slot] = current_text
+        self._settings.setValue(
+            f"prompts/slot_{self._active_prompt_slot}",
+            current_text,
+        )
+
+    def _save_current_prompt_name(self) -> None:
+        default_name = self._prompt_slot_labels[self._active_prompt_slot]
+        current_name = self._prompt_slot_names[self._active_prompt_slot].strip() or default_name
+        self._prompt_slot_names[self._active_prompt_slot] = current_name
+        self._settings.setValue(
+            f"prompts/name_{self._active_prompt_slot}",
+            current_name,
+        )
+
+    def _refresh_prompt_slot_buttons(self) -> None:
+        for index, item in enumerate(self._prompt_slot_items):
+            item.set_text(self._prompt_slot_names[index])
+            item.set_active(index == self._active_prompt_slot)
+
+    def _on_prompt_text_changed(self) -> None:
+        if self._is_switching_prompt_slot:
+            return
+        self._save_current_prompt_slot()
+
+    def _edit_prompt_slot_name(self, index: int) -> None:
+        current_name = self._prompt_slot_names[index]
+        default_name = self._prompt_slot_labels[index]
+        new_name, ok = QInputDialog.getText(
+            self,
+            "编辑提示词名称",
+            "名称：",
+            text=current_name,
+        )
+        if not ok:
+            return
+        final_name = new_name.strip() or default_name
+        self._prompt_slot_names[index] = final_name
+        self._settings.setValue(f"prompts/name_{index}", final_name)
+        self._refresh_prompt_slot_buttons()
+
+    def _set_active_prompt_slot(self, index: int) -> None:
+        if index < 0 or index >= len(self._prompt_slot_labels):
+            return
+        if hasattr(self, "prompt_edit"):
+            self._save_current_prompt_slot()
+        self._active_prompt_slot = index
+        self._settings.setValue("prompts/active_slot", index)
+        if hasattr(self, "prompt_edit"):
+            self._is_switching_prompt_slot = True
+            self.prompt_edit.setPlainText(self._prompt_slot_values[index])
+            self._is_switching_prompt_slot = False
+        self._refresh_prompt_slot_buttons()
+
+    def _save_prompt_settings(self) -> None:
+        self._save_current_prompt_slot()
+        self._save_current_prompt_name()
+        self._settings.setValue("prompts/active_slot", self._active_prompt_slot)
+        for index, value in enumerate(self._prompt_slot_values):
+            self._settings.setValue(f"prompts/slot_{index}", value)
+        for index, name in enumerate(self._prompt_slot_names):
+            self._settings.setValue(f"prompts/name_{index}", name)
+        self._settings.sync()
 
     def _build_ui(self) -> None:
         central = QWidget(self)
@@ -474,6 +853,11 @@ class MainWindow(QMainWindow):
             f"  image: url({_check_svg});"
             "}"
         )
+        self.wechat_account_combo = ChevronComboBox()
+        self.wechat_account_combo.setToolTip("选择当前生效的公众号账号")
+        self.wechat_add_account_button = QPushButton("新增")
+        self.wechat_rename_account_button = QPushButton("编辑")
+        self.wechat_delete_account_button = QPushButton("删除")
         self.wechat_appid_edit = QLineEdit()
         self.wechat_appid_edit.setPlaceholderText("请输入")
         self.wechat_appsecret_edit = QLineEdit()
@@ -489,17 +873,8 @@ class MainWindow(QMainWindow):
         self.ark_model_edit.setText(
             self._settings.value("ark/model", os.getenv("ARK_MODEL", ""))
         )
-        self.wechat_appid_edit.setText(
-            self._settings.value("wechat/appid", os.getenv("WECHAT_APPID", ""))
-        )
-        self.wechat_appsecret_edit.setText(
-            self._settings.value("wechat/appsecret", os.getenv("WECHAT_APPSECRET", ""))
-        )
-        self.wechat_thumb_media_id_edit.setText(
-            self._settings.value(
-                "wechat/thumb_media_id", os.getenv("WECHAT_THUMB_MEDIA_ID", "")
-            )
-        )
+        self._apply_current_wechat_account_to_inputs()
+        self._refresh_wechat_account_combo()
         # 联网开关：本地优先，其次回退到环境变量 ARK_ENABLE_WEB_SEARCH
         enable_web_search_default = os.getenv("ARK_ENABLE_WEB_SEARCH", "0").strip()
         enable_web_search_flag = enable_web_search_default.lower() in {
@@ -514,6 +889,24 @@ class MainWindow(QMainWindow):
         self.enable_web_search_checkbox.setChecked(
             str(enable_web_search_value).lower() in {"1", "true", "yes", "on"}
         )
+        for button in (
+            self.wechat_add_account_button,
+            self.wechat_rename_account_button,
+            self.wechat_delete_account_button,
+        ):
+            button.setStyleSheet(
+                "QPushButton {"
+                "  padding: 6px 10px;"
+                "  font-size: 12px;"
+                "}"
+            )
+        self.wechat_account_combo.currentIndexChanged.connect(self._switch_wechat_account)
+        self.wechat_add_account_button.clicked.connect(self._add_wechat_account)
+        self.wechat_rename_account_button.clicked.connect(self._rename_wechat_account)
+        self.wechat_delete_account_button.clicked.connect(self._delete_wechat_account)
+        self.wechat_appid_edit.editingFinished.connect(self._save_account_settings)
+        self.wechat_appsecret_edit.editingFinished.connect(self._save_account_settings)
+        self.wechat_thumb_media_id_edit.editingFinished.connect(self._save_account_settings)
 
         self.upload_thumb_button = QPushButton("📁 上传图片")
         self.upload_thumb_button.setToolTip(
@@ -541,6 +934,16 @@ class MainWindow(QMainWindow):
         ]:
             config_box.add_widget(field_label(lbl_text))
             config_box.add_widget(widget)
+        config_box.add_widget(field_label("公众号账号"))
+        account_row_top = QWidget()
+        account_row_top_layout = QHBoxLayout(account_row_top)
+        account_row_top_layout.setContentsMargins(0, 0, 0, 0)
+        account_row_top_layout.setSpacing(6)
+        account_row_top_layout.addWidget(self.wechat_account_combo, 1)
+        account_row_top_layout.addWidget(self.wechat_add_account_button)
+        account_row_top_layout.addWidget(self.wechat_rename_account_button)
+        account_row_top_layout.addWidget(self.wechat_delete_account_button)
+        config_box.add_widget(account_row_top)
         for lbl_text, widget in [
             ("公众号 AppID", self.wechat_appid_edit),
             ("公众号 Secret", self.wechat_appsecret_edit),
@@ -559,7 +962,7 @@ class MainWindow(QMainWindow):
         self.topic_edit = QLineEdit()
         self.topic_edit.setPlaceholderText("必填")
 
-        self.audience_combo = QComboBox()
+        self.audience_combo = ChevronComboBox()
         self.audience_combo.addItem("微信用户", "经常使用微信的普通用户")
         self.audience_combo.addItem("不指定", "")
         self.audience_combo.addItem("职场新人", "职场新人")
@@ -569,19 +972,19 @@ class MainWindow(QMainWindow):
         self.audience_combo.addItem("小白用户", "几乎零基础的小白用户")
         self.audience_combo.addItem("中小企业老板", "中小企业老板或个体经营者")
 
-        self.style_combo = QComboBox()
+        self.style_combo = ChevronComboBox()
         self.style_combo.addItem("不指定", "")
         self.style_combo.addItem("科普聊天", "通俗易懂、像跟朋友聊天一样的科普风格。")
         self.style_combo.addItem("职场干货", "结构清晰、观点明确、偏职场实战干货。")
         self.style_combo.addItem("故事分享", "通过个人故事或案例来讲道理，轻松、有画面感。")
         self.style_combo.addItem("运营拆解", "以拆解案例为主，有步骤、有数据、有总结。")
 
-        self.length_combo = QComboBox()
+        self.length_combo = ChevronComboBox()
         self.length_combo.addItem("中等", "medium")
         self.length_combo.addItem("偏短", "short")
         self.length_combo.addItem("偏长", "long")
 
-        self.mode_combo = QComboBox()
+        self.mode_combo = ChevronComboBox()
         self.mode_combo.addItem("标准干货", "standard")
         self.mode_combo.addItem("故事化", "story")
         self.mode_combo.addItem("案例拆解", "case_study")
@@ -661,7 +1064,7 @@ class MainWindow(QMainWindow):
         prompt_label.setStyleSheet("font-size: 13px; color: #6b7280; font-weight: 500;")
         self.prompt_edit = QPlainTextEdit()
         self.prompt_edit.setPlaceholderText("可选：自定义写作风格与规则，留空则使用默认提示词")
-        self.prompt_edit.setPlainText(build_article_system_prompt())
+        self.prompt_edit.setPlainText(self._prompt_slot_values[self._active_prompt_slot])
         self.prompt_edit.setFixedHeight(140)
         self.prompt_edit.setStyleSheet(
             "QPlainTextEdit {"
@@ -676,6 +1079,8 @@ class MainWindow(QMainWindow):
         )
 
         # ---------- 右侧结果 ----------
+        self.prompt_edit.textChanged.connect(self._on_prompt_text_changed)
+
         result_group = QGroupBox()
         result_group.setStyleSheet(
             "QGroupBox {"
@@ -803,15 +1208,23 @@ class MainWindow(QMainWindow):
             "  background-color: #d1d5db;"
             "}"
         )
+        for index, _ in enumerate(self._prompt_slot_labels):
+            item = PromptSlotItem(index, self._prompt_slot_names[index])
+            item.activated.connect(self._set_active_prompt_slot)
+            item.rename_requested.connect(self._edit_prompt_slot_name)
+            self._prompt_slot_items.append(item)
         self.reset_prompt_button.clicked.connect(self._on_reset_prompt_clicked)
 
         # 顶部操作栏：提示词标签 + 按钮组
         top_bar = QHBoxLayout()
-        top_bar.setSpacing(12)
+        top_bar.setSpacing(6)
         top_bar.addWidget(prompt_label)
+        for item in self._prompt_slot_items:
+            top_bar.addWidget(item)
         top_bar.addStretch(1)
         top_bar.addWidget(self.reset_prompt_button)
         top_bar.addWidget(self.generate_button)
+        self._refresh_prompt_slot_buttons()
         
         result_layout.addLayout(top_bar)
         result_layout.addWidget(self.prompt_edit)
@@ -834,7 +1247,7 @@ class MainWindow(QMainWindow):
 
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
-        left_scroll.setFixedWidth(280)
+        left_scroll.setFixedWidth(350)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         left_scroll.setStyleSheet(
@@ -865,6 +1278,11 @@ class MainWindow(QMainWindow):
             self._loading_overlay.setGeometry(self._central_widget.rect())
         return super().eventFilter(obj, event)
 
+    def closeEvent(self, event) -> None:
+        self._save_account_settings()
+        self._save_prompt_settings()
+        super().closeEvent(event)
+
     def _build_menu(self) -> None:
         menubar = self.menuBar()
 
@@ -880,7 +1298,10 @@ class MainWindow(QMainWindow):
 
     def _on_reset_prompt_clicked(self) -> None:
         """恢复为默认系统提示词。"""
-        self.prompt_edit.setPlainText(build_article_system_prompt())
+        default_prompt = self._prompt_slot_defaults[self._active_prompt_slot]
+        self._prompt_slot_values[self._active_prompt_slot] = default_prompt
+        self.prompt_edit.setPlainText(default_prompt)
+        self._save_current_prompt_slot()
 
     def _on_generate_clicked(self) -> None:
         topic = self.topic_edit.text().strip()
@@ -903,6 +1324,7 @@ class MainWindow(QMainWindow):
 
         # 保存当前账号配置，方便下次启动自动带出
         self._save_account_settings()
+        self._save_prompt_settings()
 
         self.generate_button.setEnabled(False)
         self.generate_button.setText("生成中...")
@@ -1033,6 +1455,7 @@ class MainWindow(QMainWindow):
                 return
 
             self.wechat_thumb_media_id_edit.setText(thumb_id)
+            self._save_account_settings()
 
         except Exception as exc:  # noqa: BLE001
             error_msg = f"上传时出错：\n{exc}"
