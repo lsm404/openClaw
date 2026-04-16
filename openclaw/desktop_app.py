@@ -5,7 +5,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional, Any, Dict
 
 import requests
 from PySide6.QtCore import QEvent, QRectF, QSettings, QTimer, Qt, QThread, Signal
@@ -320,6 +320,12 @@ class GenerateWorker(QThread):
         length: ArticleLength,
         mode: WritingMode,
         system_prompt: Optional[str],
+        creation_mode: str,
+        source_article: Optional[str],
+        rewrite_goal: str,
+        reference_focus: str,
+        reference_level: str,
+        expression_mode: str,
         config_override: Optional[OpenClawConfig] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
@@ -330,6 +336,12 @@ class GenerateWorker(QThread):
         self._length = length
         self._mode = mode
         self._system_prompt = system_prompt
+        self._creation_mode = creation_mode
+        self._source_article = source_article
+        self._rewrite_goal = rewrite_goal
+        self._reference_focus = reference_focus
+        self._reference_level = reference_level
+        self._expression_mode = expression_mode
         self._config_override = config_override
 
     def run(self) -> None:
@@ -343,6 +355,12 @@ class GenerateWorker(QThread):
                 length=self._length,
                 mode=self._mode,
                 system_prompt=self._system_prompt,
+                creation_mode=self._creation_mode,
+                source_article=self._source_article,
+                rewrite_goal=self._rewrite_goal,
+                reference_focus=self._reference_focus,
+                reference_level=self._reference_level,
+                expression_mode=self._expression_mode,
             )
             self.finished.emit(content)
         except Exception as exc:  # noqa: BLE001
@@ -799,6 +817,95 @@ class MainWindow(QMainWindow):
             self._settings.setValue(f"prompts/name_{index}", name)
         self._settings.sync()
 
+    @staticmethod
+    def _set_combo_current_data(combo: QComboBox, target: str) -> None:
+        for index in range(combo.count()):
+            if combo.itemData(index) == target:
+                combo.setCurrentIndex(index)
+                return
+
+    def _save_article_settings(self) -> None:
+        if not hasattr(self, "creation_mode_combo"):
+            return
+        self._settings.setValue(
+            "article/rewrite_goal",
+            self.rewrite_goal_combo.currentData() or "new_article",
+        )
+        self._settings.setValue(
+            "article/reference_focus",
+            self.reference_focus_combo.currentData() or "mixed",
+        )
+        self._settings.setValue(
+            "article/reference_level",
+            self.reference_level_combo.currentData() or "medium",
+        )
+        self._settings.setValue(
+            "article/expression_mode",
+            self.expression_mode_combo.currentData() or "standard",
+        )
+        self._settings.sync()
+
+    def _default_generate_button_text(self) -> str:
+        if not hasattr(self, "creation_mode_combo"):
+            return "✨ 生成文章"
+        return (
+            "✨ 参考改写"
+            if (self.creation_mode_combo.currentData() or "original") == "rewrite"
+            else "✨ 生成文章"
+        )
+
+    def _update_creation_mode_ui(self) -> None:
+        if not hasattr(self, "creation_mode_combo"):
+            return
+        is_rewrite = (self.creation_mode_combo.currentData() or "original") == "rewrite"
+        for widget in (
+            self.rewrite_goal_label,
+            self.rewrite_goal_combo,
+            self.reference_focus_label,
+            self.reference_focus_combo,
+            self.reference_level_label,
+            self.reference_level_combo,
+            self.reference_article_panel,
+        ):
+            widget.setVisible(is_rewrite)
+
+        if is_rewrite:
+            self.topic_edit.setPlaceholderText("选填：不填则沿用参考文章主题")
+            self.reference_article_edit.setMinimumHeight(220)
+            self.prompt_edit.setMinimumHeight(170)
+            self.result_edit.setMinimumHeight(320)
+        else:
+            self.topic_edit.setPlaceholderText("必填")
+            self.prompt_edit.setMinimumHeight(140)
+            self.result_edit.setMinimumHeight(240)
+
+        if hasattr(self, "right_scroll"):
+            self.right_scroll.setVerticalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAsNeeded
+                if is_rewrite
+                else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            self.right_scroll.verticalScrollBar().setEnabled(is_rewrite)
+            if not is_rewrite:
+                self.right_scroll.verticalScrollBar().setValue(0)
+
+        if hasattr(self, "generate_button") and (
+            self._worker is None or not self._worker.isRunning()
+        ):
+            self.generate_button.setText(self._default_generate_button_text())
+
+        self._save_article_settings()
+
+    def _paste_source_article_from_clipboard(self) -> None:
+        text = QApplication.clipboard().text().strip()
+        if not text:
+            QMessageBox.information(self, "提示", "剪贴板里没有可粘贴的文章内容。")
+            return
+        self.reference_article_edit.setPlainText(text)
+
+    def _clear_source_article(self) -> None:
+        self.reference_article_edit.clear()
+
     def _build_ui(self) -> None:
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -959,6 +1066,10 @@ class MainWindow(QMainWindow):
         # ── 文章折叠面板 ──────────────────────────────
         article_box = CollapsibleBox("文章")
 
+        self.creation_mode_combo = ChevronComboBox()
+        self.creation_mode_combo.addItem("原创生成", "original")
+        self.creation_mode_combo.addItem("参考改写", "rewrite")
+
         self.topic_edit = QLineEdit()
         self.topic_edit.setPlaceholderText("必填")
 
@@ -991,6 +1102,29 @@ class MainWindow(QMainWindow):
         self.mode_combo.addItem("清单文", "listicle")
         self.mode_combo.addItem("深度分析", "analysis")
 
+        self.rewrite_goal_combo = ChevronComboBox()
+        self.rewrite_goal_combo.addItem("生成新稿", "new_article")
+        self.rewrite_goal_combo.addItem("换个角度写", "new_angle")
+        self.rewrite_goal_combo.addItem("更口语一点", "more_conversational")
+        self.rewrite_goal_combo.addItem("更干货一点", "more_actionable")
+
+        self.reference_focus_combo = ChevronComboBox()
+        self.reference_focus_combo.addItem("综合借鉴", "mixed")
+        self.reference_focus_combo.addItem("借鉴结构", "structure")
+        self.reference_focus_combo.addItem("借鉴语气", "tone")
+        self.reference_focus_combo.addItem("借鉴开头切口", "opening")
+
+        self.reference_level_combo = ChevronComboBox()
+        self.reference_level_combo.addItem("低", "low")
+        self.reference_level_combo.addItem("中", "medium")
+        self.reference_level_combo.addItem("高", "high")
+
+        self.expression_mode_combo = ChevronComboBox()
+        self.expression_mode_combo.addItem("标准", "standard")
+        self.expression_mode_combo.addItem("更口语", "conversational")
+        self.expression_mode_combo.addItem("去AI味", "de_ai")
+        self.expression_mode_combo.addItem("强观点", "opinionated")
+
         # 给所有下拉框的弹出视图加投影 + 背景色，产生层次感
         def _apply_combo_popup_style(combo: QComboBox) -> None:
             shadow = QGraphicsDropShadowEffect()
@@ -1004,10 +1138,30 @@ class MainWindow(QMainWindow):
             )
 
         for _combo in (
-            self.audience_combo, self.style_combo,
+            self.creation_mode_combo, self.audience_combo, self.style_combo,
             self.length_combo, self.mode_combo,
+            self.rewrite_goal_combo, self.reference_focus_combo, self.reference_level_combo,
+            self.expression_mode_combo,
         ):
             _apply_combo_popup_style(_combo)
+
+        self.creation_mode_combo.setCurrentIndex(0)
+        self._set_combo_current_data(
+            self.rewrite_goal_combo,
+            str(self._settings.value("article/rewrite_goal", "new_article") or "new_article"),
+        )
+        self._set_combo_current_data(
+            self.reference_focus_combo,
+            str(self._settings.value("article/reference_focus", "mixed") or "mixed"),
+        )
+        self._set_combo_current_data(
+            self.reference_level_combo,
+            str(self._settings.value("article/reference_level", "medium") or "medium"),
+        )
+        self._set_combo_current_data(
+            self.expression_mode_combo,
+            str(self._settings.value("article/expression_mode", "standard") or "standard"),
+        )
 
         self.generate_button = QPushButton("✨ 生成文章")
         self.generate_button.setMinimumHeight(40)
@@ -1033,24 +1187,38 @@ class MainWindow(QMainWindow):
         article_grid.setVerticalSpacing(8)
         article_grid.setHorizontalSpacing(10)
 
-        for row, (lbl_text, widget) in enumerate([
-            ("主题", self.topic_edit),
-            ("读者", self.audience_combo),
-            ("风格", self.style_combo),
-            ("长度", self.length_combo),
-            ("模式", self.mode_combo),
-        ]):
+        article_rows = [
+            ("创作方式", self.creation_mode_combo, "creation_mode_label"),
+            ("主题", self.topic_edit, "topic_label"),
+            ("读者", self.audience_combo, "audience_label"),
+            ("风格", self.style_combo, "style_label"),
+            ("表达处理", self.expression_mode_combo, "expression_mode_label"),
+            ("长度", self.length_combo, "length_label"),
+            ("模式", self.mode_combo, "mode_label"),
+            ("改写目标", self.rewrite_goal_combo, "rewrite_goal_label"),
+            ("借鉴维度", self.reference_focus_combo, "reference_focus_label"),
+            ("参考程度", self.reference_level_combo, "reference_level_label"),
+        ]
+
+        for row, (lbl_text, widget, attr_name) in enumerate(article_rows):
             lbl = QLabel(lbl_text)
             lbl.setStyleSheet(
                 "color: #6b7280; font-size: 13px; font-weight: 500;"
                 "background: transparent; border: none;"
             )
+            setattr(self, attr_name, lbl)
             article_grid.addWidget(lbl, row, 0)
             article_grid.addWidget(widget, row, 1)
 
         # 联网开关放在最后一行，跨两列
-        next_row = len([("主题",), ("读者",), ("风格",), ("长度",), ("模式",)])
+        next_row = len(article_rows)
         article_grid.addWidget(self.enable_web_search_checkbox, next_row, 0, 1, 2)
+
+        self.creation_mode_combo.currentIndexChanged.connect(self._update_creation_mode_ui)
+        self.rewrite_goal_combo.currentIndexChanged.connect(self._save_article_settings)
+        self.reference_focus_combo.currentIndexChanged.connect(self._save_article_settings)
+        self.reference_level_combo.currentIndexChanged.connect(self._save_article_settings)
+        self.expression_mode_combo.currentIndexChanged.connect(self._save_article_settings)
 
         article_box.add_widget(article_grid_widget)
 
@@ -1060,12 +1228,67 @@ class MainWindow(QMainWindow):
 
 
         # 提示词编辑区（系统提示词）
+        self.reference_article_panel = QWidget()
+        self.reference_article_panel.setStyleSheet("background: transparent; border: none;")
+        reference_layout = QVBoxLayout(self.reference_article_panel)
+        reference_layout.setContentsMargins(0, 0, 0, 0)
+        reference_layout.setSpacing(8)
+
+        reference_header = QHBoxLayout()
+        reference_header.setContentsMargins(0, 0, 0, 0)
+        reference_header.setSpacing(8)
+        reference_label = QLabel("🧷 参考文章")
+        reference_label.setStyleSheet("font-size: 13px; color: #6b7280; font-weight: 500;")
+        self.paste_source_button = QPushButton("粘贴")
+        self.paste_source_button.setToolTip("从剪贴板粘贴参考文章")
+        self.clear_source_button = QPushButton("清空")
+        self.clear_source_button.setToolTip("清空参考文章内容")
+        for button in (self.paste_source_button, self.clear_source_button):
+            button.setStyleSheet(
+                "QPushButton {"
+                "  padding: 4px 12px;"
+                "  font-size: 12px;"
+                "  border-radius: 6px;"
+                "}"
+            )
+        self.paste_source_button.clicked.connect(self._paste_source_article_from_clipboard)
+        self.clear_source_button.clicked.connect(self._clear_source_article)
+        reference_header.addWidget(reference_label)
+        reference_header.addStretch(1)
+        reference_header.addWidget(self.paste_source_button)
+        reference_header.addWidget(self.clear_source_button)
+
+        self.reference_article_edit = QPlainTextEdit()
+        self.reference_article_edit.setPlaceholderText(
+            "把要参考的爆款文章正文粘贴在这里。\n\n系统会重点借鉴结构、切口和表达节奏，生成一篇新的原创版本，而不是直接复述原文。"
+        )
+        self.reference_article_edit.setMinimumHeight(220)
+        self.reference_article_edit.setStyleSheet(
+            "QPlainTextEdit {"
+            "  border: 1px solid #d1d5db;"
+            "  border-radius: 6px;"
+            "  background-color: #f9fafb;"
+            "  color: #111827;"
+            "  font-size: 12px;"
+            "  padding: 10px;"
+            "  line-height: 1.5;"
+            "}"
+        )
+
+        reference_hint = QLabel("建议粘贴完整正文；不会默认长期保存这篇参考文章。")
+        reference_hint.setStyleSheet(
+            "color: #9ca3af; font-size: 11px; background: transparent; border: none;"
+        )
+        reference_layout.addLayout(reference_header)
+        reference_layout.addWidget(self.reference_article_edit)
+        reference_layout.addWidget(reference_hint)
+
         prompt_label = QLabel("💡 系统提示词")
         prompt_label.setStyleSheet("font-size: 13px; color: #6b7280; font-weight: 500;")
         self.prompt_edit = QPlainTextEdit()
         self.prompt_edit.setPlaceholderText("可选：自定义写作风格与规则，留空则使用默认提示词")
         self.prompt_edit.setPlainText(self._prompt_slot_values[self._active_prompt_slot])
-        self.prompt_edit.setFixedHeight(140)
+        self.prompt_edit.setMinimumHeight(170)
         self.prompt_edit.setStyleSheet(
             "QPlainTextEdit {"
             "  border: 1px solid #d1d5db;"
@@ -1111,7 +1334,9 @@ class MainWindow(QMainWindow):
 
         self.result_edit = QPlainTextEdit()
         self.result_edit.setPlaceholderText("生成后的 Markdown 显示在此。")
-        self.result_edit.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.result_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.result_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.result_edit.setMinimumHeight(320)
         self.result_edit.setStyleSheet(
             "QPlainTextEdit {"
             "  border: 1px solid #d1d5db;"
@@ -1226,12 +1451,14 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(self.generate_button)
         self._refresh_prompt_slot_buttons()
         
+        result_layout.addWidget(self.reference_article_panel)
         result_layout.addLayout(top_bar)
         result_layout.addWidget(self.prompt_edit)
         result_layout.addWidget(title_label)
         result_layout.addWidget(warn_label)
         result_layout.addWidget(self.result_edit)
         result_layout.addLayout(buttons_bar)
+        self._update_creation_mode_ui()
 
         # 主区域：左侧 + 右侧（顶部对齐）
         main_v = QVBoxLayout(central)
@@ -1256,8 +1483,25 @@ class MainWindow(QMainWindow):
         )
         left_scroll.setWidget(left_widget)
 
+        right_content = QWidget()
+        right_content.setStyleSheet("background: transparent; border: none;")
+        right_content_layout = QVBoxLayout(right_content)
+        right_content_layout.setContentsMargins(0, 0, 0, 0)
+        right_content_layout.setSpacing(0)
+        right_content_layout.addWidget(result_group)
+
+        self.right_scroll = QScrollArea()
+        self.right_scroll.setWidgetResizable(True)
+        self.right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.right_scroll.setStyleSheet(
+            "QScrollArea { border: none; background: transparent; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        self.right_scroll.setWidget(right_content)
+
         top_layout.addWidget(left_scroll, 0)
-        top_layout.addWidget(result_group, 1)
+        top_layout.addWidget(self.right_scroll, 1)
         main_v.addWidget(top_widget, 1)
 
         # 水印：整窗底部，左右居中
@@ -1280,6 +1524,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._save_account_settings()
+        self._save_article_settings()
         self._save_prompt_settings()
         super().closeEvent(event)
 
@@ -1305,9 +1550,19 @@ class MainWindow(QMainWindow):
 
     def _on_generate_clicked(self) -> None:
         topic = self.topic_edit.text().strip()
-        if not topic:
+        creation_mode = self.creation_mode_combo.currentData() or "original"
+        source_article = self.reference_article_edit.toPlainText().strip() or None
+
+        if creation_mode == "original" and not topic:
             QMessageBox.warning(self, "提示", "请先填写文章主题。")
             return
+        if creation_mode == "rewrite":
+            if not source_article:
+                QMessageBox.warning(self, "提示", "请先粘贴一篇参考文章。")
+                return
+            if len(source_article) < 300:
+                QMessageBox.warning(self, "提示", "参考文章内容太短了，建议至少粘贴 300 字以上的完整正文。")
+                return
 
         audience = self.audience_combo.currentData() or None
         style = self.style_combo.currentData() or None
@@ -1315,6 +1570,10 @@ class MainWindow(QMainWindow):
         length: ArticleLength = length_value  # type: ignore[assignment]
         mode_value = self.mode_combo.currentData()
         mode: WritingMode = mode_value  # type: ignore[assignment]
+        rewrite_goal = self.rewrite_goal_combo.currentData() or "new_article"
+        reference_focus = self.reference_focus_combo.currentData() or "mixed"
+        reference_level = self.reference_level_combo.currentData() or "medium"
+        expression_mode = self.expression_mode_combo.currentData() or "standard"
 
         if self._worker is not None and self._worker.isRunning():
             QMessageBox.information(self, "提示", "正在生成中，请稍候……")
@@ -1324,11 +1583,16 @@ class MainWindow(QMainWindow):
 
         # 保存当前账号配置，方便下次启动自动带出
         self._save_account_settings()
+        self._save_article_settings()
         self._save_prompt_settings()
 
         self.generate_button.setEnabled(False)
         self.generate_button.setText("生成中...")
-        self._loading_overlay.show_overlay("正在生成文章...")
+        self._loading_overlay.show_overlay(
+            "正在参考改写..."
+            if creation_mode == "rewrite"
+            else "正在生成文章..."
+        )
 
         # 记录最近一次生成使用的主题，后面作为公众号标题候选
         self._last_topic = topic
@@ -1353,6 +1617,12 @@ class MainWindow(QMainWindow):
             length=length,
             mode=mode,
             system_prompt=system_prompt,
+            creation_mode=creation_mode,
+            source_article=source_article,
+            rewrite_goal=rewrite_goal,
+            reference_focus=reference_focus,
+            reference_level=reference_level,
+            expression_mode=expression_mode,
             config_override=config_override,
             parent=self,
         )
@@ -1363,13 +1633,13 @@ class MainWindow(QMainWindow):
     def _on_generate_finished(self, content: str) -> None:
         self._loading_overlay.hide_overlay()
         self.generate_button.setEnabled(True)
-        self.generate_button.setText("生成文章")
+        self.generate_button.setText(self._default_generate_button_text())
         self.result_edit.setPlainText(content)
 
     def _on_generate_failed(self, message: str) -> None:
         self._loading_overlay.hide_overlay()
         self.generate_button.setEnabled(True)
-        self.generate_button.setText("生成文章")
+        self.generate_button.setText(self._default_generate_button_text())
         QMessageBox.critical(self, "生成失败", f"调用大模型失败：\n{message}")
 
     def _copy_result_to_clipboard(self) -> None:
