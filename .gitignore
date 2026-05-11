@@ -42,6 +42,9 @@ dist/
 
 ### 前端 / 其他常见目录（预防未来扩展）
 node_modules/
+openclaw-tauri\node_modules/
+openclaw-tauri\dist/
+openclaw-tauri\src-tauri\target/
 
 ### Cursor / 编辑器辅助文件
 .cursor/

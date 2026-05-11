@@ -14,7 +14,7 @@ from .prompt_templates import (
 
 ArticleLength = Literal["short", "medium", "long"]
 WritingMode = Literal["standard", "story", "case_study", "listicle", "analysis"]
-CreationMode = Literal["original", "rewrite"]
+CreationMode = Literal["synthesized", "rewrite"]
 RewriteGoal = Literal[
     "new_article",
     "new_angle",
@@ -42,7 +42,7 @@ class ArticleGenerator:
         length: ArticleLength = "medium",
         mode: WritingMode = "standard",
         system_prompt: Optional[str] = None,
-        creation_mode: CreationMode = "original",
+        creation_mode: CreationMode = "synthesized",
         source_article: Optional[str] = None,
         rewrite_goal: RewriteGoal = "new_article",
         reference_focus: ReferenceFocus = "mixed",

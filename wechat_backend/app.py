@@ -7,12 +7,51 @@ from typing import Any, Dict, Optional
 import markdown
 import requests
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+from openclaw.config import OpenClawConfig, load_config
+from openclaw.generator import (
+    ArticleGenerator,
+    ArticleLength,
+    CreationMode,
+    ExpressionMode,
+    ReferenceFocus,
+    ReferenceLevel,
+    RewriteGoal,
+    WritingMode,
+)
 
 from .config import WechatConfig, load_wechat_config
 
 
 app = FastAPI(title="OpenClaw WeChat Backend", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class GenerateRequest(BaseModel):
+    topic: str
+    audience: Optional[str] = None
+    style: Optional[str] = None
+    length: ArticleLength = "medium"
+    mode: WritingMode = "standard"
+    system_prompt: Optional[str] = None
+    creation_mode: CreationMode = "synthesized"
+    source_article: Optional[str] = None
+    rewrite_goal: RewriteGoal = "new_article"
+    reference_focus: ReferenceFocus = "mixed"
+    reference_level: ReferenceLevel = "medium"
+    expression_mode: ExpressionMode = "standard"
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+    api_base_url: Optional[str] = None
+    enable_web_search: Optional[bool] = None
 
 
 class DraftRequest(BaseModel):
@@ -77,6 +116,53 @@ token_cache = TokenCache()
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/article/generate")
+def generate_article(req: GenerateRequest) -> dict[str, Any]:
+    if not req.topic.strip() and req.creation_mode != "rewrite":
+        raise HTTPException(status_code=400, detail="topic 不能为空")
+
+    try:
+        if req.api_key and req.model:
+            config = OpenClawConfig(
+                api_key=req.api_key.strip(),
+                base_url=(req.api_base_url or "https://ark.cn-beijing.volces.com/api/v3").strip(),
+                model=req.model.strip(),
+                enable_web_search=bool(req.enable_web_search),
+            )
+        else:
+            config = load_config()
+        generator = ArticleGenerator(config)
+        article = generator.generate(
+            topic=req.topic.strip(),
+            audience=(req.audience or "").strip() or None,
+            style=(req.style or "").strip() or None,
+            length=req.length,
+            mode=req.mode,
+            system_prompt=(req.system_prompt or "").strip() or None,
+            creation_mode=req.creation_mode,
+            source_article=req.source_article,
+            rewrite_goal=req.rewrite_goal,
+            reference_focus=req.reference_focus,
+            reference_level=req.reference_level,
+            expression_mode=req.expression_mode,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"生成失败: {exc}") from exc
+
+    return {
+        "ok": True,
+        "article_md": article,
+        "meta": {
+            "model": config.model,
+            "length": req.length,
+            "mode": req.mode,
+            "creation_mode": req.creation_mode,
+        },
+    }
 
 
 @app.post("/wechat/upload_thumb")

@@ -24,6 +24,7 @@ wechat_backend/
   config.py          # 公众号配置
 requirements.txt
 README.md
+openclaw-tauri/      # 新的 Tauri Windows 客户端骨架
 ```
 
 ### 安装依赖
@@ -114,4 +115,39 @@ python -m openclaw \
 - 支持多篇文章批量生成（给出多个 topic 列表）。
 - 支持从提示词模板库中选择「选题框架」。
 - 支持把生成结果拆分为多条朋友圈 / 视频号脚本。
+
+### Tauri 客户端骨架
+
+仓库里新增了 `openclaw-tauri/`，用于承接新的桌面客户端重写：
+
+```text
+openclaw-tauri/
+  src/               # React + TypeScript 前端壳
+  src-tauri/         # Tauri Rust 入口
+```
+
+当前骨架已经包含：
+
+- Tauri 2 基础配置
+- React + TypeScript + Vite 前端工程
+- Python 后端 `/health` 健康检查示例
+- 文章生成 / 草稿推送 payload 预览
+- 面向线上 Python 服务的 API 地址配置
+
+推荐开发方式：
+
+1. 准备好已部署的 Python API 服务地址
+2. 进入 `openclaw-tauri/`
+3. 安装前端依赖后运行 Tauri 开发模式
+
+参考命令：
+
+```bash
+cd openclaw-tauri
+npm install
+set VITE_API_BASE_URL=https://api.your-domain.com
+npm run tauri dev
+```
+
+如果不在环境变量里提供地址，也可以在客户端界面里直接填写，应用会把它保存在本地。
 
